@@ -123,15 +123,21 @@ function sshExecPersistent(connectionId, command, whitelist, blacklist, timeoutM
       clearInterval(poll);
       reject(new Error('Timeout menunggu output perintah (shell persisten)'));
     }, timeoutMs || 30000);
+    const donePattern = new RegExp(marker + ':(\\d+)');
     poll = setInterval(() => {
-      const idx = shellState.buffer.indexOf(marker, startLen);
-      if (idx === -1) return;
+      // Cari pola "marker:<digit>" secara langsung, bukan cuma teks marker mentah.
+      // Marker mentah juga muncul lebih dulu di echo terminal dari baris perintah
+      // `echo "marker:$?"` yang baru diketik (belum dieksekusi, $? masih literal) —
+      // kalau berhenti di situ, exit code tidak pernah ketemu (selalu null) dan
+      // shell akan menunggu perintah berikutnya sebagai lanjutan baris tsb.
+      const searchStr = shellState.buffer.slice(startLen);
+      const exitMatch = searchStr.match(donePattern);
+      if (!exitMatch) return;
       clearInterval(poll);
       clearTimeout(timeout);
+      const idx = startLen + exitMatch.index;
       const before = shellState.buffer.slice(startLen, idx);
-      const after = shellState.buffer.slice(idx);
-      const exitMatch = after.match(new RegExp(marker + ':(\\d+)'));
-      const exitCode = exitMatch ? parseInt(exitMatch[1], 10) : null;
+      const exitCode = parseInt(exitMatch[1], 10);
       const lines = before.split('\n').filter(l => !l.includes(marker));
       // baris pertama biasanya echo dari command yang diketik
       if (lines.length && lines[0].trim().endsWith(command.trim().split('\n').pop().trim())) lines.shift();
