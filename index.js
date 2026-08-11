@@ -276,6 +276,22 @@ async function sshUpload(connectionId, localPath, remotePath) {
   }
 }
 
+async function sshWriteFile(connectionId, remotePath, content, encoding) {
+  const config = sshConfigs.get(connectionId);
+  if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
+  const sftp = new SftpClient();
+  try {
+    const buf = Buffer.from(content, encoding === 'base64' ? 'base64' : 'utf8');
+    await sftp.connect(config);
+    await sftp.put(buf, remotePath);
+    await sftp.end();
+    return `File berhasil ditulis: ${remotePath} (${buf.length} bytes)`;
+  } catch (err) {
+    await sftp.end().catch(() => {});
+    throw err;
+  }
+}
+
 async function sshDownload(connectionId, remotePath, localPath) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
@@ -374,6 +390,20 @@ function createServer(sshDefaultConfig) {
             remotePath: { type: 'string', description: 'Path tujuan di server remote' }
           },
           required: ['connectionId', 'localPath', 'remotePath']
+        }
+      },
+      {
+        name: 'ssh_write_file',
+        description: 'Tulis file baru (atau timpa) langsung di server remote dari string konten — tanpa perlu file lokal terlebih dahulu. Cocok untuk client yang sandbox-nya terpisah dari VPS ini (mis. tidak bisa pakai ssh_upload karena localPath tidak terjangkau).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            remotePath: { type: 'string', description: 'Path tujuan di server remote' },
+            content: { type: 'string', description: 'Isi file yang akan ditulis' },
+            encoding: { type: 'string', description: 'Encoding dari "content": "utf8" (default) atau "base64" untuk konten biner' }
+          },
+          required: ['connectionId', 'remotePath', 'content']
         }
       },
       {
@@ -605,6 +635,15 @@ function createServer(sshDefaultConfig) {
         return { content: [{ type: 'text', text: result }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Upload Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_write_file') {
+      try {
+        const result = await sshWriteFile(args.connectionId, args.remotePath, args.content, args.encoding);
+        return { content: [{ type: 'text', text: result }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Write File Error: ' + err.message }] };
       }
     }
 
@@ -842,7 +881,7 @@ if (cliArgs.includes('--http')) {
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: '3.1.0', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
