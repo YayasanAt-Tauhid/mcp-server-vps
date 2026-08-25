@@ -691,6 +691,9 @@ const cliArgs = process.argv.slice(2);
 
 if (cliArgs.includes('--http')) {
   const PORT = process.env.PORT || 3100;
+  // Bind host bisa dipersempit ke loopback saat dipublikasikan lewat Cloudflare Tunnel.
+  // Default 0.0.0.0 dipertahankan untuk kompatibilitas deployment lain.
+  const BIND_HOST = process.env.BIND_HOST || '0.0.0.0';
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
@@ -885,8 +888,8 @@ if (cliArgs.includes('--http')) {
     ssh_connections_active: sshConnections.size
   }));
 
-  app.listen(PORT, () => {
-    console.error(`MCP SSH Server v3.1.0: http://0.0.0.0:${PORT}`);
+  app.listen(PORT, BIND_HOST, () => {
+    console.error(`MCP SSH Server v3.1.0: http://${BIND_HOST}:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
