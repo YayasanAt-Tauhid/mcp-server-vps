@@ -30,6 +30,11 @@ const sshConnections = new Map();
 const sshConfigs = new Map(); // simpan config untuk SFTP reuse
 const sshShells = new Map(); // connectionId -> { stream, buffer } (shell persisten)
 const sshBackgroundJobs = new Map(); // connectionId -> Set of { pid, logFile, command }
+const uploadSlots = new Map(); // one-time browser upload tokens -> { connectionId, remotePath, maxBytes, expiresAt }
+const DEFAULT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+const MAX_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+const DEFAULT_UPLOAD_TTL_SECONDS = 10 * 60;
+const MAX_ACTIVE_UPLOAD_SLOTS = 100;
 
 function shQuote(str) {
   return "'" + String(str).replace(/'/g, `'"'"'`) + "'";
@@ -276,6 +281,44 @@ async function sshUpload(connectionId, localPath, remotePath) {
   }
 }
 
+async function sshUploadBuffer(connectionId, buffer, remotePath) {
+  const config = sshConfigs.get(connectionId);
+  if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
+  const sftp = new SftpClient();
+  try {
+    await sftp.connect(config);
+    await sftp.put(buffer, remotePath);
+    await sftp.end();
+    return `File berhasil diupload langsung: ${remotePath} (${buffer.length} bytes)`;
+  } catch (err) {
+    await sftp.end().catch(() => {});
+    throw err;
+  }
+}
+
+function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds) {
+  if (!sshConfigs.has(connectionId)) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
+  const now = Date.now();
+  for (const [existingToken, slot] of uploadSlots) {
+    if (slot.expiresAt <= now) uploadSlots.delete(existingToken);
+  }
+  if (uploadSlots.size >= MAX_ACTIVE_UPLOAD_SLOTS) throw new Error('Terlalu banyak upload slot aktif; tunggu slot lama kedaluwarsa');
+  const size = Number.isFinite(Number(maxBytes)) ? Math.floor(Number(maxBytes)) : DEFAULT_UPLOAD_MAX_BYTES;
+  if (size < 1 || size > MAX_UPLOAD_MAX_BYTES) throw new Error(`maxBytes harus 1..${MAX_UPLOAD_MAX_BYTES}`);
+  const ttl = Number.isFinite(Number(expiresInSeconds)) ? Math.floor(Number(expiresInSeconds)) : DEFAULT_UPLOAD_TTL_SECONDS;
+  if (ttl < 60 || ttl > 3600) throw new Error('expiresInSeconds harus 60..3600');
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + ttl * 1000;
+  uploadSlots.set(token, { connectionId, remotePath, maxBytes: size, expiresAt });
+  return {
+    uploadUrl: `${BASE_URL}/upload-ui#token=${token}`,
+    remotePath,
+    maxBytes: size,
+    expiresAt: new Date(expiresAt).toISOString(),
+    instructions: 'Buka uploadUrl di browser Work, pilih file lokal, lalu klik Upload. File dikirim sebagai binary langsung ke VPS; jangan encode Base64.'
+  };
+}
+
 async function sshWriteFile(connectionId, remotePath, content, encoding) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
@@ -339,7 +382,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.1.0' },
+    { name: 'vps2-mcp', version: '3.2.0' },
     { capabilities: { tools: {} } }
   );
 
@@ -390,6 +433,20 @@ function createServer(sshDefaultConfig) {
             remotePath: { type: 'string', description: 'Path tujuan di server remote' }
           },
           required: ['connectionId', 'localPath', 'remotePath']
+        }
+      },
+      {
+        name: 'ssh_create_upload_slot',
+        description: 'Buat URL upload browser satu-kali pakai untuk mengirim file binary langsung ke server SSH tanpa Base64/token bloat. Gunakan ini untuk PNG/JPG/WebP/PDF/ZIP/APK dan file binary lain dari sandbox Work.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            remotePath: { type: 'string', description: 'Path tujuan final di server remote; dikunci ke slot ini' },
+            maxBytes: { type: 'number', description: 'Batas ukuran file, default 20 MiB, maksimum 25 MiB' },
+            expiresInSeconds: { type: 'number', description: 'Masa berlaku slot, default 600 detik; rentang 60..3600' }
+          },
+          required: ['connectionId', 'remotePath']
         }
       },
       {
@@ -638,6 +695,15 @@ function createServer(sshDefaultConfig) {
       }
     }
 
+    if (name === 'ssh_create_upload_slot') {
+      try {
+        const result = createUploadSlot(args.connectionId, args.remotePath, args.maxBytes, args.expiresInSeconds);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Create Upload Slot Error: ' + err.message }] };
+      }
+    }
+
     if (name === 'ssh_write_file') {
       try {
         const result = await sshWriteFile(args.connectionId, args.remotePath, args.content, args.encoding);
@@ -826,7 +892,7 @@ if (cliArgs.includes('--http')) {
   });
 
   function authMiddleware(req, res, next) {
-    if (req.path === '/health' || req.path.startsWith('/oauth') || req.path.startsWith('/.well-known')) return next();
+    if (req.path === '/health' || req.path === '/upload-ui' || req.path === '/upload-file' || req.path.startsWith('/oauth') || req.path.startsWith('/.well-known')) return next();
     const authHeader = req.headers['authorization'] || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : (req.query.token || '');
     const tokenData = accessTokens.get(token);
@@ -839,6 +905,67 @@ if (cliArgs.includes('--http')) {
   app.use(authMiddleware);
 
   const transports = {};
+  app.get('/upload-ui', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
+    res.set('Content-Security-Policy', "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");
+    res.type('html').send(`<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Safara MCP File Upload</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 18px">
+<h1>Safara MCP File Upload</h1>
+<p>Pilih file dari workspace Work. File akan dikirim sebagai binary langsung ke VPS tanpa Base64.</p>
+<input id="file" type="file"><button id="upload" type="button">Upload</button>
+<pre id="status" style="white-space:pre-wrap"></pre>
+<script>
+const statusEl=document.getElementById('status');
+const token=new URLSearchParams(location.hash.slice(1)).get('token');
+if(!token) statusEl.textContent='Token upload tidak ditemukan.';
+document.getElementById('upload').onclick=async()=>{
+  const file=document.getElementById('file').files[0];
+  if(!token||!file) return statusEl.textContent='Pilih file terlebih dahulu.';
+  statusEl.textContent='Mengunggah '+file.name+' ...';
+  try {
+    const r=await fetch('/upload-file',{method:'POST',headers:{'Authorization':'Upload '+token,'Content-Type':'application/octet-stream','X-Filename':file.name},body:file});
+    const text=await r.text();
+    statusEl.textContent=(r.ok?'Berhasil: ':'Gagal: ')+text;
+  } catch(e) { statusEl.textContent='Gagal: '+e.message; }
+};
+</script></body></html>`);
+  });
+
+  app.post('/upload-file', (req, res, next) => {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Upload ') ? auth.slice(7) : '';
+    const slot = uploadSlots.get(token);
+    if (!slot) return res.status(401).json({ error: 'invalid_or_used_upload_token' });
+    if (Date.now() > slot.expiresAt) {
+      uploadSlots.delete(token);
+      return res.status(410).json({ error: 'upload_token_expired' });
+    }
+    const declaredLength = Number(req.headers['content-length']);
+    if (Number.isFinite(declaredLength) && declaredLength > slot.maxBytes) {
+      return res.status(413).json({ error: 'file_too_large', maxBytes: slot.maxBytes });
+    }
+    req.uploadToken = token;
+    req.uploadSlot = slot;
+    next();
+  }, express.raw({ type: 'application/octet-stream', limit: `${MAX_UPLOAD_MAX_BYTES}b` }), async (req, res) => {
+    const token = req.uploadToken;
+    const slot = req.uploadSlot;
+    if (!Buffer.isBuffer(req.body) || req.body.length < 1) return res.status(400).json({ error: 'empty_file' });
+    if (req.body.length > slot.maxBytes) return res.status(413).json({ error: 'file_too_large', maxBytes: slot.maxBytes });
+    // Consume before upload so retries cannot overwrite the destination.
+    uploadSlots.delete(token);
+    try {
+      await sshUploadBuffer(slot.connectionId, req.body, slot.remotePath);
+      res.json({ ok: true, remotePath: slot.remotePath, bytes: req.body.length });
+    } catch (err) {
+      console.error('[UPLOAD]', err.message);
+      res.status(500).json({ error: 'upload_failed' });
+    }
+  });
+
   app.post('/', async (req, res) => {
     const sid = req.headers['mcp-session-id'];
     req.headers["accept"] = "application/json, text/event-stream";
@@ -883,8 +1010,8 @@ if (cliArgs.includes('--http')) {
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.1.0', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
+    status: 'ok', version: '3.2.0', mode: 'http', auth: 'oauth2-password-protected',
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
