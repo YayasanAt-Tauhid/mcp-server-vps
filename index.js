@@ -501,7 +501,7 @@ function createServer(sshDefaultConfig) {
       },
       {
         name: 'ssh_create_upload_slot',
-        description: 'Buat URL upload browser satu-kali pakai untuk mengirim file binary langsung ke server SSH tanpa Base64/token bloat. Gunakan ini untuk PNG/JPG/WebP/PDF/ZIP/APK dan file binary lain dari sandbox Work.',
+        description: 'PILIHAN WAJIB/UTAMA untuk transfer file binary dari Work/cloud workspace ke Safara. Buat URL upload browser satu-kali pakai agar PNG/JPG/WebP/PDF/ZIP/APK dikirim sebagai binary langsung tanpa Base64/token bloat. JANGAN kirim binary lewat ssh_write_file encoding=base64 selama tool ini tersedia. Gunakan Base64 hanya sebagai fallback terakhir bila upload slot benar-benar tidak dapat digunakan.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -517,14 +517,14 @@ function createServer(sshDefaultConfig) {
       },
       {
         name: 'ssh_write_file',
-        description: 'Tulis file baru (atau timpa) langsung di server remote dari string konten — tanpa perlu file lokal terlebih dahulu. Cocok untuk client yang sandbox-nya terpisah dari VPS ini (mis. tidak bisa pakai ssh_upload karena localPath tidak terjangkau).',
+        description: 'Tulis file teks UTF-8 baru (atau timpa) langsung di server remote dari string konten. Untuk file binary dari Work/cloud workspace, JANGAN gunakan encoding=base64 bila ssh_create_upload_slot tersedia; prioritaskan upload slot agar hemat token dan mendapat validasi keamanan. Base64 hanya fallback terakhir jika upload slot benar-benar tidak dapat digunakan.',
         inputSchema: {
           type: 'object',
           properties: {
             connectionId: { type: 'string', description: 'ID koneksi SSH' },
             remotePath: { type: 'string', description: 'Path tujuan di server remote' },
             content: { type: 'string', description: 'Isi file yang akan ditulis' },
-            encoding: { type: 'string', description: 'Encoding dari "content": "utf8" (default) atau "base64" untuk konten biner' }
+            encoding: { type: 'string', description: 'Encoding content: utf8 (default). base64 hanya fallback terakhir untuk binary jika ssh_create_upload_slot tidak dapat digunakan; jangan pilih base64 untuk binary Work selama upload slot tersedia.' }
           },
           required: ['connectionId', 'remotePath', 'content']
         }
