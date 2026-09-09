@@ -5,7 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import { readFileSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, extname, normalize, sep } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { Client } from 'ssh2';
@@ -35,6 +35,63 @@ const DEFAULT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 const DEFAULT_UPLOAD_TTL_SECONDS = 10 * 60;
 const MAX_ACTIVE_UPLOAD_SLOTS = 100;
+const UPLOAD_ALLOWED_ROOTS = (process.env.UPLOAD_ALLOWED_ROOTS || [
+  '/home/safara/projects/safara/safaraojolnative-deploy/native/assets',
+  '/home/safara/projects/safara/safaraojolnative-deploy/web/public',
+  '/home/safara/projects/safara/laundry-development/native/assets',
+  '/home/safara/projects/safara/laundry-development/web/public',
+  '/home/safara/projects/SafaraLandingpage/assets'
+].join(',')).split(',').map(v => resolve(v.trim())).filter(Boolean);
+const UPLOAD_RATE_WINDOW_MS = 60 * 1000;
+const UPLOAD_RATE_MAX_PER_IP = 20;
+const uploadRate = new Map();
+const UPLOAD_KINDS = {
+  image: new Set(['.png', '.jpg', '.jpeg', '.webp']),
+  pdf: new Set(['.pdf']),
+  zip: new Set(['.zip']),
+  apk: new Set(['.apk'])
+};
+
+function isPathInside(root, candidate) {
+  const r = resolve(root);
+  const c = resolve(candidate);
+  return c === r || c.startsWith(r + sep);
+}
+
+function validateUploadDestination(remotePath, kind = 'image') {
+  if (typeof remotePath !== 'string' || !remotePath.startsWith('/') || remotePath.includes('\0')) {
+    throw new Error('remotePath harus path absolut yang valid');
+  }
+  const normalized = resolve(normalize(remotePath));
+  if (!UPLOAD_ALLOWED_ROOTS.some(root => isPathInside(root, normalized))) {
+    throw new Error('remotePath di luar direktori upload yang diizinkan');
+  }
+  if (!UPLOAD_KINDS[kind]) throw new Error('kind tidak didukung');
+  const ext = extname(normalized).toLowerCase();
+  if (!UPLOAD_KINDS[kind].has(ext)) throw new Error(`Ekstensi ${ext || '(tanpa ekstensi)'} tidak diizinkan untuk kind=${kind}`);
+  return normalized;
+}
+
+function detectUploadKind(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return null;
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]))) return 'image';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image';
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image';
+  if (buf.toString('ascii', 0, 5) === '%PDF-') return 'pdf';
+  if (buf[0] === 0x50 && buf[1] === 0x4b && [0x03,0x05,0x07].includes(buf[2]) && [0x04,0x06,0x08].includes(buf[3])) return 'zip';
+  return null;
+}
+
+function isUploadRateLimited(ip) {
+  const now = Date.now();
+  const entry = uploadRate.get(ip);
+  if (!entry || now - entry.startedAt >= UPLOAD_RATE_WINDOW_MS) {
+    uploadRate.set(ip, { startedAt: now, count: 1 });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > UPLOAD_RATE_MAX_PER_IP;
+}
 
 function shQuote(str) {
   return "'" + String(str).replace(/'/g, `'"'"'`) + "'";
@@ -281,12 +338,16 @@ async function sshUpload(connectionId, localPath, remotePath) {
   }
 }
 
-async function sshUploadBuffer(connectionId, buffer, remotePath) {
+async function sshUploadBuffer(connectionId, buffer, remotePath, allowOverwrite = false) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
   const sftp = new SftpClient();
   try {
     await sftp.connect(config);
+    if (!allowOverwrite) {
+      const exists = await sftp.exists(remotePath);
+      if (exists) throw new Error('destination_exists');
+    }
     await sftp.put(buffer, remotePath);
     await sftp.end();
     return `File berhasil diupload langsung: ${remotePath} (${buffer.length} bytes)`;
@@ -296,8 +357,9 @@ async function sshUploadBuffer(connectionId, buffer, remotePath) {
   }
 }
 
-function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds) {
+function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds, kind = 'image', allowOverwrite = false) {
   if (!sshConfigs.has(connectionId)) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
+  const safeRemotePath = validateUploadDestination(remotePath, kind);
   const now = Date.now();
   for (const [existingToken, slot] of uploadSlots) {
     if (slot.expiresAt <= now) uploadSlots.delete(existingToken);
@@ -309,10 +371,12 @@ function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds) 
   if (ttl < 60 || ttl > 3600) throw new Error('expiresInSeconds harus 60..3600');
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = Date.now() + ttl * 1000;
-  uploadSlots.set(token, { connectionId, remotePath, maxBytes: size, expiresAt });
+  uploadSlots.set(token, { connectionId, remotePath: safeRemotePath, maxBytes: size, expiresAt, kind, allowOverwrite: !!allowOverwrite });
   return {
     uploadUrl: `${BASE_URL}/upload-ui#token=${token}`,
-    remotePath,
+    remotePath: safeRemotePath,
+    kind,
+    allowOverwrite: !!allowOverwrite,
     maxBytes: size,
     expiresAt: new Date(expiresAt).toISOString(),
     instructions: 'Buka uploadUrl di browser Work, pilih file lokal, lalu klik Upload. File dikirim sebagai binary langsung ke VPS; jangan encode Base64.'
@@ -382,7 +446,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.2.0' },
+    { name: 'vps2-mcp', version: '3.3.0' },
     { capabilities: { tools: {} } }
   );
 
@@ -444,7 +508,9 @@ function createServer(sshDefaultConfig) {
             connectionId: { type: 'string', description: 'ID koneksi SSH' },
             remotePath: { type: 'string', description: 'Path tujuan final di server remote; dikunci ke slot ini' },
             maxBytes: { type: 'number', description: 'Batas ukuran file, default 20 MiB, maksimum 25 MiB' },
-            expiresInSeconds: { type: 'number', description: 'Masa berlaku slot, default 600 detik; rentang 60..3600' }
+            expiresInSeconds: { type: 'number', description: 'Masa berlaku slot, default 600 detik; rentang 60..3600' },
+            kind: { type: 'string', enum: ['image','pdf','zip','apk'], description: 'Jenis file; default image. Signature file akan diverifikasi.' },
+            allowOverwrite: { type: 'boolean', description: 'Izinkan menimpa file existing; default false' }
           },
           required: ['connectionId', 'remotePath']
         }
@@ -697,7 +763,7 @@ function createServer(sshDefaultConfig) {
 
     if (name === 'ssh_create_upload_slot') {
       try {
-        const result = createUploadSlot(args.connectionId, args.remotePath, args.maxBytes, args.expiresInSeconds);
+        const result = createUploadSlot(args.connectionId, args.remotePath, args.maxBytes, args.expiresInSeconds, args.kind || 'image', args.allowOverwrite || false);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Create Upload Slot Error: ' + err.message }] };
@@ -935,6 +1001,8 @@ document.getElementById('upload').onclick=async()=>{
   });
 
   app.post('/upload-file', (req, res, next) => {
+    const ip = getClientIP(req);
+    if (isUploadRateLimited(ip)) return res.status(429).json({ error: 'upload_rate_limited' });
     const auth = req.headers.authorization || '';
     const token = auth.startsWith('Upload ') ? auth.slice(7) : '';
     const slot = uploadSlots.get(token);
@@ -955,13 +1023,18 @@ document.getElementById('upload').onclick=async()=>{
     const slot = req.uploadSlot;
     if (!Buffer.isBuffer(req.body) || req.body.length < 1) return res.status(400).json({ error: 'empty_file' });
     if (req.body.length > slot.maxBytes) return res.status(413).json({ error: 'file_too_large', maxBytes: slot.maxBytes });
-    // Consume before upload so retries cannot overwrite the destination.
+    const detectedKind = detectUploadKind(req.body);
+    const validKind = slot.kind === 'apk' ? detectedKind === 'zip' : detectedKind === slot.kind;
+    if (!validKind) return res.status(415).json({ error: 'file_signature_mismatch', expected: slot.kind });
+    // Consume before upload so a successful/failed attempt cannot be replayed.
     uploadSlots.delete(token);
     try {
-      await sshUploadBuffer(slot.connectionId, req.body, slot.remotePath);
-      res.json({ ok: true, remotePath: slot.remotePath, bytes: req.body.length });
+      await sshUploadBuffer(slot.connectionId, req.body, slot.remotePath, slot.allowOverwrite);
+      console.error(`[UPLOAD] ok path=${slot.remotePath} bytes=${req.body.length} kind=${slot.kind} overwrite=${slot.allowOverwrite}`);
+      res.json({ ok: true, remotePath: slot.remotePath, bytes: req.body.length, kind: slot.kind });
     } catch (err) {
-      console.error('[UPLOAD]', err.message);
+      if (err.message === 'destination_exists') return res.status(409).json({ error: 'destination_exists' });
+      console.error('[UPLOAD] failed:', err.message);
       res.status(500).json({ error: 'upload_failed' });
     }
   });
@@ -1010,7 +1083,7 @@ document.getElementById('upload').onclick=async()=>{
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.2.0', mode: 'http', auth: 'oauth2-password-protected',
+    status: 'ok', version: '3.3.0', mode: 'http', auth: 'oauth2-password-protected',
     tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
