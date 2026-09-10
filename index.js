@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import { Client } from 'ssh2';
 import SftpClient from 'ssh2-sftp-client';
 import {
+  CHAT_WORKFLOW_INSTRUCTIONS,
   assertAbsolutePath,
   assertCheckpointId,
   buildRepoSnapshotCommand,
@@ -594,8 +595,8 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.4.0' },
-    { capabilities: { tools: {} } }
+    { name: 'vps2-mcp', version: '3.4.1' },
+    { capabilities: { tools: {} }, instructions: CHAT_WORKFLOW_INSTRUCTIONS }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -801,7 +802,7 @@ function createServer(sshDefaultConfig) {
       },
       {
         name: 'ssh_checkpoint',
-        description: 'Simpan/pulihkan checkpoint kerja non-secret di target SSH (~/.mcp-workflow/checkpoints) agar sesi Chat berikutnya dapat melanjutkan pekerjaan. Jangan masukkan password, token, API key, private key, .env, atau credential; pola secret umum ditolak saat save.',
+        description: 'Saat melanjutkan pekerjaan, pilih checkpoint yang sesuai tujuan/project; latest bisa milik tugas lain. Bandingkan dengan snapshot Git aktual. Simpan setelah milestone dan sebelum mengakhiri sesi. Simpan/pulihkan checkpoint kerja non-secret di target SSH (~/.mcp-workflow/checkpoints) agar sesi Chat berikutnya dapat melanjutkan pekerjaan. Jangan masukkan password, token, API key, private key, .env, atau credential; pola secret umum ditolak saat save.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1012,7 +1013,7 @@ function createServer(sshDefaultConfig) {
         const result = await sshRepoSnapshotWorkflow(args.connectionId, args.repoPath, args.fetch, args.whitelist, args.blacklist);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
-        return { content: [{ type: 'text', text: 'Repo Snapshot Error: ' + err.message }] };
+        return { isError: true, content: [{ type: 'text', text: 'Repo Snapshot Error: ' + err.message }] };
       }
     }
 
@@ -1024,7 +1025,7 @@ function createServer(sshDefaultConfig) {
         const result = await sshCheckpointWorkflow(args.connectionId, args.action, args.checkpointId, args.data, args.whitelist, args.blacklist);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
-        return { content: [{ type: 'text', text: 'Checkpoint Error: ' + err.message }] };
+        return { isError: true, content: [{ type: 'text', text: 'Checkpoint Error: ' + err.message }] };
       }
     }
 
@@ -1033,7 +1034,7 @@ function createServer(sshDefaultConfig) {
         const result = await sshRepoVerifyWorkflow(args.connectionId, args.repoPath, args.runScripts, args.whitelist, args.blacklist);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
-        return { content: [{ type: 'text', text: 'Repo Verify Error: ' + err.message }] };
+        return { isError: true, content: [{ type: 'text', text: 'Repo Verify Error: ' + err.message }] };
       }
     }
 
@@ -1323,13 +1324,13 @@ document.getElementById('upload').onclick=async()=>{
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.4.0', mode: 'http', auth: 'oauth2-password-protected',
+    status: 'ok', version: '3.4.1', mode: 'http', auth: 'oauth2-password-protected',
     tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
   app.listen(PORT, BIND_HOST, () => {
-    console.error(`MCP SSH Server v3.4.0: http://${BIND_HOST}:${PORT}`);
+    console.error(`MCP SSH Server v3.4.1: http://${BIND_HOST}:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
@@ -1337,5 +1338,5 @@ document.getElementById('upload').onclick=async()=>{
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MCP SSH Server v3.4.0 siap! (stdio mode)');
+  console.error('MCP SSH Server v3.4.1 siap! (stdio mode)');
 }

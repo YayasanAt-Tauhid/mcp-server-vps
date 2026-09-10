@@ -128,3 +128,25 @@ test('snapshot command executes and parses a real git fixture', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('snapshot and verify support linked Git worktrees', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-worktree-test-'));
+  const linked = dir + '-linked';
+  try {
+    git(dir, 'init', '-q');
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'test');
+    writeFileSync(join(dir, 'README.md'), 'fixture');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'fixture');
+    git(dir, 'worktree', 'add', '-qb', 'linked', linked);
+    for (const command of [buildRepoSnapshotCommand(linked), buildRepoVerifyCommand(linked)]) {
+      const r = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr || r.stdout);
+    }
+  } finally {
+    rmSync(linked, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
