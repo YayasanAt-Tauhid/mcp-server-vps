@@ -10,6 +10,16 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { Client } from 'ssh2';
 import SftpClient from 'ssh2-sftp-client';
+import {
+  assertAbsolutePath,
+  assertCheckpointId,
+  buildRepoSnapshotCommand,
+  buildRepoVerifyCommand,
+  normalizeCheckpoint,
+  parseTaggedOutput,
+  shellQuote as workflowShellQuote,
+  truncateText
+} from './workflow.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -414,6 +424,144 @@ async function sshDownload(connectionId, remotePath, localPath) {
   }
 }
 
+
+// --- Workflow helpers: repo snapshot, persistent checkpoint, verification ---
+
+function getWorkflowAcl(connectionId, whitelist, blacklist) {
+  const config = sshConfigs.get(connectionId) || {};
+  return {
+    whitelist: whitelist || config.whitelist || [],
+    blacklist: blacklist || config.blacklist || []
+  };
+}
+
+async function workflowExec(connectionId, command, whitelist, blacklist) {
+  const acl = getWorkflowAcl(connectionId, whitelist, blacklist);
+  const result = await sshExec(connectionId, command, acl.whitelist, acl.blacklist);
+  if (result.exitCode !== 0) {
+    throw new Error(truncateText(result.stderr || result.stdout || `command gagal dengan exit code ${result.exitCode}`, 8000));
+  }
+  return result.stdout || '';
+}
+
+async function sshRepoSnapshotWorkflow(connectionId, repoPath, fetch, whitelist, blacklist) {
+  assertAbsolutePath(repoPath, 'repoPath');
+  const output = await workflowExec(connectionId, buildRepoSnapshotCommand(repoPath, !!fetch), whitelist, blacklist);
+  const parsed = parseTaggedOutput(output);
+  return {
+    repoPath,
+    fetched: !!fetch,
+    branch: parsed.branch || null,
+    commit: parsed.commit || null,
+    upstream: parsed.upstream || null,
+    aheadBehind: parsed.ahead_behind || null,
+    status: parsed.status || '',
+    latest: parsed.latest || null,
+    scripts: parsed.scripts ? parsed.scripts.split(',').filter(Boolean) : []
+  };
+}
+
+async function getRemoteHome(connectionId, whitelist, blacklist) {
+  const output = (await workflowExec(connectionId, 'printf \'%s\' "$HOME"', whitelist, blacklist)).trim();
+  assertAbsolutePath(output, 'remote HOME');
+  return output.replace(/\/+$/, '');
+}
+
+async function getCheckpointPaths(connectionId, checkpointId, whitelist, blacklist) {
+  const home = await getRemoteHome(connectionId, whitelist, blacklist);
+  const dir = `${home}/.mcp-workflow/checkpoints`;
+  const file = checkpointId ? `${dir}/${assertCheckpointId(checkpointId)}.json` : null;
+  return { dir, file };
+}
+
+async function loadCheckpointFile(connectionId, checkpointId, whitelist, blacklist) {
+  const { file } = await getCheckpointPaths(connectionId, checkpointId, whitelist, blacklist);
+  const q = workflowShellQuote(file);
+  const output = await workflowExec(
+    connectionId,
+    `if [ ! -f ${q} ]; then echo 'checkpoint tidak ditemukan' >&2; exit 44; fi; cat -- ${q}`,
+    whitelist,
+    blacklist
+  );
+  try {
+    return JSON.parse(output);
+  } catch {
+    throw new Error('checkpoint rusak atau bukan JSON valid');
+  }
+}
+
+async function sshCheckpointWorkflow(connectionId, action, checkpointId, data, whitelist, blacklist) {
+  if (!['save', 'load', 'list', 'latest'].includes(action)) throw new Error('action checkpoint tidak valid');
+
+  if (action === 'save') {
+    const normalized = normalizeCheckpoint(checkpointId, data || {});
+    const { dir, file } = await getCheckpointPaths(connectionId, checkpointId, whitelist, blacklist);
+    await workflowExec(
+      connectionId,
+      `umask 077; mkdir -p -- ${workflowShellQuote(dir)}; chmod 700 -- ${workflowShellQuote(dir)}`,
+      whitelist,
+      blacklist
+    );
+
+    let snapshot = null;
+    if (normalized.repoPath) {
+      snapshot = await sshRepoSnapshotWorkflow(connectionId, normalized.repoPath, false, whitelist, blacklist);
+      if (!normalized.branch && snapshot.branch) normalized.branch = snapshot.branch;
+      if (!normalized.commit && snapshot.commit) normalized.commit = snapshot.commit;
+    }
+
+    const stored = {
+      ...normalized,
+      savedAt: new Date().toISOString(),
+      ...(snapshot ? { repoStatus: truncateText(snapshot.status, 4000) } : {})
+    };
+    await sshWriteFile(connectionId, file, JSON.stringify(stored, null, 2) + '\n', 'utf8');
+    await workflowExec(connectionId, `chmod 600 -- ${workflowShellQuote(file)}`, whitelist, blacklist);
+    return stored;
+  }
+
+  if (action === 'load') {
+    assertCheckpointId(checkpointId);
+    return loadCheckpointFile(connectionId, checkpointId, whitelist, blacklist);
+  }
+
+  const { dir } = await getCheckpointPaths(connectionId, null, whitelist, blacklist);
+  const qDir = workflowShellQuote(dir);
+  const output = await workflowExec(
+    connectionId,
+    `if [ -d ${qDir} ]; then find ${qDir} -maxdepth 1 -type f -name '*.json' -printf '%T@ %f\\n' | sort -nr | head -50; fi`,
+    whitelist,
+    blacklist
+  );
+  const items = output.split(/\r?\n/).filter(Boolean).map(line => {
+    const firstSpace = line.indexOf(' ');
+    const stamp = firstSpace >= 0 ? Number(line.slice(0, firstSpace)) : NaN;
+    const filename = firstSpace >= 0 ? line.slice(firstSpace + 1) : line;
+    return {
+      checkpointId: filename.replace(/\.json$/, ''),
+      modifiedAt: Number.isFinite(stamp) ? new Date(stamp * 1000).toISOString() : null
+    };
+  });
+
+  if (action === 'list') return { checkpoints: items };
+  if (!items.length) return { checkpoint: null };
+  return { checkpoint: await loadCheckpointFile(connectionId, items[0].checkpointId, whitelist, blacklist) };
+}
+
+async function sshRepoVerifyWorkflow(connectionId, repoPath, runScripts, whitelist, blacklist) {
+  const acl = getWorkflowAcl(connectionId, whitelist, blacklist);
+  const command = buildRepoVerifyCommand(repoPath, runScripts || []);
+  const result = await sshExec(connectionId, command, acl.whitelist, acl.blacklist);
+  const combined = [result.stdout, result.stderr].filter(Boolean).join('\n');
+  return {
+    ok: result.exitCode === 0,
+    exitCode: result.exitCode,
+    repoPath,
+    runScripts: runScripts || [],
+    output: truncateText(combined || '(tidak ada output)', 20000)
+  };
+}
+
 // Auth & rate limiting
 const authCodes = new Map();
 const accessTokens = new Map();
@@ -446,7 +594,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.3.0' },
+    { name: 'vps2-mcp', version: '3.4.0' },
     { capabilities: { tools: {} } }
   );
 
@@ -637,6 +785,68 @@ function createServer(sshDefaultConfig) {
         }
       },
       {
+        name: 'ssh_repo_snapshot',
+        description: 'Ambil snapshot Git terstruktur untuk bootstrap/restore pekerjaan: branch, commit, upstream, ahead/behind, working tree, commit terbaru, dan scripts package.json. Opsi fetch=true menjalankan git fetch --all --prune tanpa checkout/reset/merge.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            repoPath: { type: 'string', description: 'Path absolut repository Git di target SSH' },
+            fetch: { type: 'boolean', description: 'Jika true, jalankan git fetch --all --prune terlebih dahulu; default false' },
+            whitelist: { type: 'array', items: { type: 'string' }, description: 'Override whitelist regex, opsional' },
+            blacklist: { type: 'array', items: { type: 'string' }, description: 'Override blacklist regex, opsional' }
+          },
+          required: ['connectionId', 'repoPath']
+        }
+      },
+      {
+        name: 'ssh_checkpoint',
+        description: 'Simpan/pulihkan checkpoint kerja non-secret di target SSH (~/.mcp-workflow/checkpoints) agar sesi Chat berikutnya dapat melanjutkan pekerjaan. Jangan masukkan password, token, API key, private key, .env, atau credential; pola secret umum ditolak saat save.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            action: { type: 'string', enum: ['save','load','list','latest'], description: 'save/load/list/latest' },
+            checkpointId: { type: 'string', description: 'ID checkpoint; wajib untuk save/load' },
+            data: {
+              type: 'object',
+              description: 'Metadata operasional non-secret untuk action=save',
+              properties: {
+                objective: { type: 'string' },
+                phase: { type: 'string', enum: ['plan','implement','review','verify','blocked','done'] },
+                project: { type: 'string' },
+                repoPath: { type: 'string' },
+                branch: { type: 'string' },
+                commit: { type: 'string' },
+                completed: { type: 'array', items: { type: 'string' } },
+                next: { type: 'array', items: { type: 'string' } },
+                artifacts: { type: 'array', items: { type: 'string' } },
+                notes: { type: 'string' }
+              },
+              additionalProperties: false
+            },
+            whitelist: { type: 'array', items: { type: 'string' }, description: 'Override whitelist regex, opsional' },
+            blacklist: { type: 'array', items: { type: 'string' }, description: 'Override blacklist regex, opsional' }
+          },
+          required: ['connectionId', 'action']
+        }
+      },
+      {
+        name: 'ssh_repo_verify',
+        description: 'Jalankan verification loop terkontrol pada repo: git diff --check, status/diff stat, dan secret-like scan pada perubahan. runScripts opsional hanya mengizinkan typecheck/lint/test/build dan menjalankan script package.json repo; gunakan setelah source repo dipercaya/reviewed.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            repoPath: { type: 'string', description: 'Path absolut repository Git' },
+            runScripts: { type: 'array', items: { type: 'string', enum: ['typecheck','lint','test','build'] }, description: 'Script package.json yang ingin dijalankan; default kosong' },
+            whitelist: { type: 'array', items: { type: 'string' }, description: 'Override whitelist regex, opsional' },
+            blacklist: { type: 'array', items: { type: 'string' }, description: 'Override blacklist regex, opsional' }
+          },
+          required: ['connectionId', 'repoPath']
+        }
+      },
+      {
         name: 'ssh_disconnect',
         description: 'Tutup koneksi SSH',
         inputSchema: {
@@ -794,6 +1004,36 @@ function createServer(sshDefaultConfig) {
         return { content: [{ type: 'text', text: JSON.stringify(files, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'SSH List Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_repo_snapshot') {
+      try {
+        const result = await sshRepoSnapshotWorkflow(args.connectionId, args.repoPath, args.fetch, args.whitelist, args.blacklist);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Repo Snapshot Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_checkpoint') {
+      try {
+        if ((args.action === 'save' || args.action === 'load') && !args.checkpointId) {
+          throw new Error('checkpointId wajib untuk action=' + args.action);
+        }
+        const result = await sshCheckpointWorkflow(args.connectionId, args.action, args.checkpointId, args.data, args.whitelist, args.blacklist);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Checkpoint Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_repo_verify') {
+      try {
+        const result = await sshRepoVerifyWorkflow(args.connectionId, args.repoPath, args.runScripts, args.whitelist, args.blacklist);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Repo Verify Error: ' + err.message }] };
       }
     }
 
@@ -1083,13 +1323,13 @@ document.getElementById('upload').onclick=async()=>{
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.3.0', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
+    status: 'ok', version: '3.4.0', mode: 'http', auth: 'oauth2-password-protected',
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
   app.listen(PORT, BIND_HOST, () => {
-    console.error(`MCP SSH Server v3.1.0: http://${BIND_HOST}:${PORT}`);
+    console.error(`MCP SSH Server v3.4.0: http://${BIND_HOST}:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
@@ -1097,5 +1337,5 @@ document.getElementById('upload').onclick=async()=>{
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MCP SSH Server v3.1.0 siap! (stdio mode)');
+  console.error('MCP SSH Server v3.4.0 siap! (stdio mode)');
 }
