@@ -21,6 +21,13 @@ import {
   shellQuote as workflowShellQuote,
   truncateText
 } from './workflow.js';
+import {
+  assertAllowedImagePath,
+  assertDeviceId,
+  assertImageBuffer,
+  normalizeImageMaxBytes,
+  toImageContent
+} from './image-tools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -32,9 +39,15 @@ try {
   });
 } catch {}
 
+const MCP_VERSION = '3.5.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
+const ADB_TUNNEL_HOST = process.env.ADB_TUNNEL_HOST || '127.0.0.1';
+const ADB_TUNNEL_PORT = Number.parseInt(process.env.ADB_TUNNEL_PORT || '15037', 10);
+if (ADB_TUNNEL_HOST !== '127.0.0.1' || !Number.isInteger(ADB_TUNNEL_PORT) || ADB_TUNNEL_PORT < 1 || ADB_TUNNEL_PORT > 65535) {
+  throw new Error('ADB tunnel harus menggunakan 127.0.0.1 dan port valid');
+}
 
 // SSH connection pool
 const sshConnections = new Map();
@@ -52,6 +65,12 @@ const UPLOAD_ALLOWED_ROOTS = (process.env.UPLOAD_ALLOWED_ROOTS || [
   '/home/safara/projects/safara/laundry-development/native/assets',
   '/home/safara/projects/safara/laundry-development/web/public',
   '/home/safara/projects/SafaraLandingpage/assets'
+].join(',')).split(',').map(v => resolve(v.trim())).filter(Boolean);
+const IMAGE_READ_ALLOWED_ROOTS = (process.env.IMAGE_READ_ALLOWED_ROOTS || [
+  '/tmp',
+  '/home/safara/backups',
+  '/home/safara/projects/safara/safaraojolnative-deploy/native/assets',
+  '/home/safara/projects/safara/laundry-development/native/assets'
 ].join(',')).split(',').map(v => resolve(v.trim())).filter(Boolean);
 const UPLOAD_RATE_WINDOW_MS = 60 * 1000;
 const UPLOAD_RATE_MAX_PER_IP = 20;
@@ -425,6 +444,48 @@ async function sshDownload(connectionId, remotePath, localPath) {
   }
 }
 
+async function sshReadImageBuffer(connectionId, remotePath, maxBytes) {
+  const config = sshConfigs.get(connectionId);
+  if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
+  if (typeof remotePath !== 'string' || !remotePath.startsWith('/') || remotePath.includes('\0')) {
+    throw new Error('remotePath harus path absolut yang valid');
+  }
+  const limit = normalizeImageMaxBytes(maxBytes);
+  const sftp = new SftpClient();
+  try {
+    await sftp.connect(config);
+    const realPath = await sftp.realPath(remotePath);
+    if (!realPath) throw new Error('path gambar tidak ditemukan');
+    assertAllowedImagePath(realPath, IMAGE_READ_ALLOWED_ROOTS);
+    const stat = await sftp.stat(realPath);
+    if (!stat || typeof stat.size !== 'number') throw new Error('metadata gambar tidak valid');
+    if (stat.size <= 0) throw new Error('file gambar kosong');
+    if (stat.size > limit) throw new Error(`gambar terlalu besar (${stat.size} bytes > ${limit})`);
+    const data = await sftp.get(realPath);
+    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    const mimeType = assertImageBuffer(buffer, limit);
+    return { buffer, mimeType, realPath, size: buffer.length };
+  } finally {
+    await sftp.end().catch(() => {});
+  }
+}
+
+async function adbScreenshotVisual(connectionId, deviceId, maxBytes) {
+  const serial = assertDeviceId(deviceId);
+  const limit = normalizeImageMaxBytes(maxBytes);
+  const tempPath = `/tmp/mcp-adb-screen-${crypto.randomBytes(8).toString('hex')}.png`;
+  const command = `umask 077; adb -H ${ADB_TUNNEL_HOST} -P ${ADB_TUNNEL_PORT} -s ${shQuote(serial)} exec-out screencap -p > ${shQuote(tempPath)}`;
+  try {
+    const capture = await sshExec(connectionId, command);
+    if (capture.exitCode !== 0) {
+      throw new Error(truncateText(capture.stderr || capture.stdout || `adb screencap gagal (${capture.exitCode})`, 4000));
+    }
+    return await sshReadImageBuffer(connectionId, tempPath, limit);
+  } finally {
+    await sshExec(connectionId, `rm -f ${shQuote(tempPath)}`).catch(() => {});
+  }
+}
+
 
 // --- Workflow helpers: repo snapshot, persistent checkpoint, verification ---
 
@@ -595,7 +656,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.4.1' },
+    { name: 'vps2-mcp', version: MCP_VERSION },
     { capabilities: { tools: {} }, instructions: CHAT_WORKFLOW_INSTRUCTIONS }
   );
 
@@ -689,6 +750,32 @@ function createServer(sshDefaultConfig) {
             localPath: { type: 'string', description: 'Path tujuan di VPS ini' }
           },
           required: ['connectionId', 'remotePath', 'localPath']
+        }
+      },
+      {
+        name: 'ssh_read_image',
+        description: 'Baca PNG/JPEG/WebP dari path remote yang diizinkan dan kembalikan sebagai MCP ImageContent agar model multimodal dapat melihat pixel. Magic bytes, realpath, allowlist direktori, dan batas ukuran diverifikasi; bukan pembaca file umum.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            remotePath: { type: 'string', description: 'Path absolut PNG/JPEG/WebP pada direktori gambar yang diizinkan' },
+            maxBytes: { type: 'number', description: 'Batas ukuran gambar, default 5 MiB dan maksimum 10 MiB' }
+          },
+          required: ['connectionId', 'remotePath']
+        }
+      },
+      {
+        name: 'adb_screenshot_visual',
+        description: 'Ambil screenshot perangkat Android yang sudah terhubung melalui reverse ADB loopback Safara lalu kembalikan sebagai MCP ImageContent. Gunakan hanya untuk pengujian Safara yang diotorisasi pengguna; tool tidak memberi akses live video dan deviceId wajib eksplisit.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            deviceId: { type: 'string', description: 'Serial ADB perangkat yang sudah diotorisasi, mis. RR8RB0B7F3A' },
+            maxBytes: { type: 'number', description: 'Batas ukuran screenshot, default 5 MiB dan maksimum 10 MiB' }
+          },
+          required: ['connectionId', 'deviceId']
         }
       },
       {
@@ -996,6 +1083,34 @@ function createServer(sshDefaultConfig) {
         return { content: [{ type: 'text', text: result }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Download Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_read_image') {
+      try {
+        const result = await sshReadImageBuffer(args.connectionId, args.remotePath, args.maxBytes);
+        return {
+          content: [
+            { type: 'text', text: `Image siap: ${result.realPath} (${result.size} bytes, ${result.mimeType})` },
+            toImageContent(result.buffer, result.mimeType)
+          ]
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Read Image Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'adb_screenshot_visual') {
+      try {
+        const result = await adbScreenshotVisual(args.connectionId, args.deviceId, args.maxBytes);
+        return {
+          content: [
+            { type: 'text', text: `Screenshot ADB ${args.deviceId} (${result.size} bytes, ${result.mimeType})` },
+            toImageContent(result.buffer, result.mimeType)
+          ]
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'ADB Screenshot Error: ' + err.message }] };
       }
     }
 
@@ -1324,13 +1439,13 @@ document.getElementById('upload').onclick=async()=>{
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.4.1', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_disconnect', 'ssh_list_connections'],
+    status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
   app.listen(PORT, BIND_HOST, () => {
-    console.error(`MCP SSH Server v3.4.1: http://${BIND_HOST}:${PORT}`);
+    console.error(`MCP SSH Server v${MCP_VERSION}: http://${BIND_HOST}:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
@@ -1338,5 +1453,5 @@ document.getElementById('upload').onclick=async()=>{
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MCP SSH Server v3.4.1 siap! (stdio mode)');
+  console.error(`MCP SSH Server v${MCP_VERSION} siap! (stdio mode)`);
 }
