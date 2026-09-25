@@ -32,6 +32,8 @@ import {
   normalizeImageMaxBytes,
   toImageContent
 } from './image-tools.js';
+import { normalizeAllowedBrowserHosts, runBrowserSmoke } from './browser-smoke.js';
+import { assertWorkspaceId, normalizeWorkspaceTasks, normalizeWorkspaceManifest } from './workspace-tools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -43,7 +45,7 @@ try {
   });
 } catch {}
 
-const MCP_VERSION = '3.6.0';
+const MCP_VERSION = '3.7.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
@@ -52,6 +54,13 @@ const ADB_TUNNEL_PORT = Number.parseInt(process.env.ADB_TUNNEL_PORT || '15037', 
 if (ADB_TUNNEL_HOST !== '127.0.0.1' || !Number.isInteger(ADB_TUNNEL_PORT) || ADB_TUNNEL_PORT < 1 || ADB_TUNNEL_PORT > 65535) {
   throw new Error('ADB tunnel harus menggunakan 127.0.0.1 dan port valid');
 }
+const BROWSER_SMOKE_ALLOWED_HOSTS = normalizeAllowedBrowserHosts(process.env.BROWSER_SMOKE_ALLOWED_HOSTS || 'safara.biz.id,.safara.biz.id,127.0.0.1,localhost');
+const BROWSER_SMOKE_LOCAL_PORTS = (process.env.BROWSER_SMOKE_LOCAL_PORTS || '3100').split(',').map(v => Number(v.trim()));
+if (!BROWSER_SMOKE_LOCAL_PORTS.length || BROWSER_SMOKE_LOCAL_PORTS.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) throw new Error('BROWSER_SMOKE_LOCAL_PORTS tidak valid');
+const MAX_BROWSER_SMOKE_CONCURRENCY = 1;
+const WORKSPACE_VERIFY_CONCURRENCY = Number(process.env.WORKSPACE_VERIFY_CONCURRENCY || '2');
+if (!Number.isInteger(WORKSPACE_VERIFY_CONCURRENCY) || WORKSPACE_VERIFY_CONCURRENCY < 1 || WORKSPACE_VERIFY_CONCURRENCY > 3) throw new Error('WORKSPACE_VERIFY_CONCURRENCY harus 1-3');
+let browserSmokeActive = 0;
 
 // SSH connection pool
 const sshConnections = new Map();
@@ -725,6 +734,219 @@ async function sshRepoCommitPushWorkflow(connectionId, args) {
   }
 }
 
+async function getWorkspaceBase(connectionId, whitelist, blacklist) {
+  const home = await getRemoteHome(connectionId, whitelist, blacklist);
+  return `${home}/.mcp-workflow/workspaces`;
+}
+
+async function getWorkspacePaths(connectionId, workspaceId, whitelist, blacklist) {
+  const id = assertWorkspaceId(workspaceId);
+  const base = await getWorkspaceBase(connectionId, whitelist, blacklist);
+  return {
+    base,
+    manifestDir: `${base}/manifests`,
+    treeBase: `${base}/trees`,
+    manifest: `${base}/manifests/${id}.json`,
+    treeRoot: `${base}/trees/${id}`
+  };
+}
+
+async function loadWorkspaceManifest(connectionId, workspaceId, whitelist, blacklist) {
+  const paths = await getWorkspacePaths(connectionId, workspaceId, whitelist, blacklist);
+  const output = await workflowExec(
+    connectionId,
+    `if [ ! -f ${workflowShellQuote(paths.manifest)} ]; then echo 'workspace tidak ditemukan' >&2; exit 44; fi; cat -- ${workflowShellQuote(paths.manifest)}`,
+    whitelist,
+    blacklist
+  );
+  let parsed;
+  try { parsed = JSON.parse(output); } catch { throw new Error('manifest workspace rusak'); }
+  return { paths, manifest: normalizeWorkspaceManifest(workspaceId, parsed, paths.treeRoot) };
+}
+
+async function sshWorkspaceWorkflow(connectionId, action, args) {
+  if (!['list', 'create', 'status', 'verify', 'remove'].includes(action)) {
+    throw new Error('action workspace tidak valid');
+  }
+  const whitelist = args.whitelist;
+  const blacklist = args.blacklist;
+
+  if (action === 'list') {
+    const base = await getWorkspaceBase(connectionId, whitelist, blacklist);
+    const dir = `${base}/manifests`;
+    const output = await workflowExec(
+      connectionId,
+      `if [ -d ${workflowShellQuote(dir)} ]; then find ${workflowShellQuote(dir)} -maxdepth 1 -type f -name '*.json' -printf '%T@ %f\\n' | sort -nr | head -50; fi`,
+      whitelist,
+      blacklist
+    );
+    return {
+      workspaces: output.split(/\r?\n/).filter(Boolean).map(line => {
+        const firstSpace = line.indexOf(' ');
+        const stamp = firstSpace >= 0 ? Number(line.slice(0, firstSpace)) : NaN;
+        const file = firstSpace >= 0 ? line.slice(firstSpace + 1) : line;
+        return {
+          workspaceId: file.replace(/\.json$/, ''),
+          modifiedAt: Number.isFinite(stamp) ? new Date(stamp * 1000).toISOString() : null
+        };
+      })
+    };
+  }
+
+  const workspaceId = assertWorkspaceId(args.workspaceId);
+
+  if (action === 'create') {
+    assertAbsolutePath(args.repoPath, 'repoPath');
+    const tasks = normalizeWorkspaceTasks(args.tasks);
+    const paths = await getWorkspacePaths(connectionId, workspaceId, whitelist, blacklist);
+    await workflowExec(
+      connectionId,
+      `if [ -e ${workflowShellQuote(paths.manifest)} ] || [ -e ${workflowShellQuote(paths.treeRoot)} ]; then echo 'workspaceId sudah ada' >&2; exit 45; fi; umask 077; mkdir -p -- ${workflowShellQuote(paths.manifestDir)} ${workflowShellQuote(paths.treeRoot)}; chmod 700 -- ${workflowShellQuote(paths.base)} ${workflowShellQuote(paths.manifestDir)} ${workflowShellQuote(paths.treeBase)} ${workflowShellQuote(paths.treeRoot)} 2>/dev/null || true`,
+      whitelist,
+      blacklist
+    );
+
+    const created = [];
+    let snapshot = null;
+    try {
+      snapshot = await sshRepoSnapshotWorkflow(connectionId, args.repoPath, args.fetch !== false, whitelist, blacklist);
+      for (const task of tasks) {
+        const worktreePath = `${paths.treeRoot}/${task.name}`;
+        await workflowExec(
+          connectionId,
+          buildRepoWorktreeCommand(args.repoPath, 'create', {
+            worktreePath,
+            branch: task.branch,
+            baseRef: task.baseRef,
+            fetch: false
+          }),
+          whitelist,
+          blacklist
+        );
+        created.push({ ...task, worktreePath });
+      }
+
+      const manifest = {
+        workspaceId,
+        repoPath: args.repoPath,
+        createdAt: new Date().toISOString(),
+        baseCommit: snapshot.commit,
+        tasks: created
+      };
+      await sshWriteFile(connectionId, paths.manifest, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+      await workflowExec(connectionId, `chmod 600 -- ${workflowShellQuote(paths.manifest)}`, whitelist, blacklist);
+      return { ok: true, action, ...manifest };
+    } catch (err) {
+      const rollbackErrors = [];
+      for (const task of [...created].reverse()) {
+        try {
+          await workflowExec(
+            connectionId,
+            buildRepoWorktreeCommand(args.repoPath, 'remove', { worktreePath: task.worktreePath }),
+            whitelist,
+            blacklist
+          );
+          await workflowExec(
+            connectionId,
+            `cd ${workflowShellQuote(args.repoPath)} && git branch -D -- ${workflowShellQuote(task.branch)}`,
+            whitelist,
+            blacklist
+          );
+        } catch (rollbackErr) {
+          rollbackErrors.push(task.name + ': ' + rollbackErr.message);
+        }
+      }
+      await workflowExec(
+        connectionId,
+        `rm -f -- ${workflowShellQuote(paths.manifest)}; rmdir --ignore-fail-on-non-empty ${workflowShellQuote(paths.treeRoot)} ${workflowShellQuote(paths.treeBase)} ${workflowShellQuote(paths.manifestDir)} ${workflowShellQuote(paths.base)} 2>/dev/null || true`,
+        whitelist,
+        blacklist
+      ).catch(() => {});
+      const suffix = rollbackErrors.length ? '; rollback incomplete: ' + rollbackErrors.join(' | ') : '';
+      throw new Error(err.message + suffix);
+    }
+  }
+
+  const { paths, manifest } = await loadWorkspaceManifest(connectionId, workspaceId, whitelist, blacklist);
+
+  if (action === 'status') {
+    const tasks = [];
+    for (const task of manifest.tasks) {
+      try {
+        const snapshot = await sshRepoSnapshotWorkflow(connectionId, task.worktreePath, false, whitelist, blacklist);
+        const dirty = snapshot.status.split(/\r?\n/).some(line => line && !line.startsWith('##'));
+        tasks.push({ ...task, ok: true, dirty, snapshot });
+      } catch (err) {
+        tasks.push({ ...task, ok: false, error: truncateText(err.message, 2000) });
+      }
+    }
+    return { ok: tasks.every(t => t.ok), action, workspaceId, repoPath: manifest.repoPath, tasks };
+  }
+
+  if (action === 'verify') {
+    const results = new Array(manifest.tasks.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= manifest.tasks.length) return;
+        const task = manifest.tasks[index];
+        try {
+          const verification = await sshRepoVerifyWorkflow(
+            connectionId,
+            task.worktreePath,
+            args.runScripts || [],
+            whitelist,
+            blacklist
+          );
+          results[index] = { ...task, ok: verification.ok, verification };
+        } catch (err) {
+          results[index] = { ...task, ok: false, error: truncateText(err.message, 3000) };
+        }
+      }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(WORKSPACE_VERIFY_CONCURRENCY, manifest.tasks.length) },
+      () => worker()
+    ));
+    return {
+      ok: results.every(r => r.ok),
+      action,
+      workspaceId,
+      repoPath: manifest.repoPath,
+      concurrency: WORKSPACE_VERIFY_CONCURRENCY,
+      tasks: results
+    };
+  }
+
+  const status = await sshWorkspaceWorkflow(connectionId, 'status', { ...args, workspaceId });
+  const dirty = status.tasks.filter(task => task.ok && task.dirty);
+  const missing = status.tasks.filter(task => !task.ok);
+  if (dirty.length || missing.length) {
+    const details = [
+      dirty.length ? 'dirty: ' + dirty.map(t => t.name).join(', ') : '',
+      missing.length ? 'missing/error: ' + missing.map(t => t.name).join(', ') : ''
+    ].filter(Boolean).join('; ');
+    throw new Error('workspace remove ditolak; ' + details);
+  }
+
+  for (const task of [...manifest.tasks].reverse()) {
+    await workflowExec(
+      connectionId,
+      buildRepoWorktreeCommand(manifest.repoPath, 'remove', { worktreePath: task.worktreePath }),
+      whitelist,
+      blacklist
+    );
+  }
+  await workflowExec(
+    connectionId,
+    `rm -f -- ${workflowShellQuote(paths.manifest)}; rmdir --ignore-fail-on-non-empty ${workflowShellQuote(paths.treeRoot)} 2>/dev/null || true`,
+    whitelist,
+    blacklist
+  );
+  return { ok: true, action, workspaceId, removedTasks: manifest.tasks.map(t => t.name), branchesPreserved: true };
+}
+
 // Auth & rate limiting
 const authCodes = new Map();
 const accessTokens = new Map();
@@ -1090,6 +1312,61 @@ function createServer(sshDefaultConfig) {
         }
       },
       {
+        name: 'browser_smoke',
+        description: 'Render smoke test Safara dengan Playwright Chromium headless pada domain allowlist. Tidak melakukan login/form action dan memblokir request keluar allowlist. Dapat memeriksa status/text/title serta mengembalikan screenshot viewport.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'URL Safara yang akan dirender' },
+            expectedStatus: {
+              oneOf: [
+                { type: 'integer', minimum: 100, maximum: 599 },
+                { type: 'array', minItems: 1, maxItems: 10, items: { type: 'integer', minimum: 100, maximum: 599 } }
+              ]
+            },
+            expectedText: { type: 'string', description: 'Teks yang harus terlihat pada body, opsional' },
+            expectedTitle: { type: 'string', description: 'Substring title yang harus cocok, opsional' },
+            timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000 },
+            screenshot: { type: 'boolean', description: 'Kembalikan screenshot viewport; default true' },
+            maxScreenshotBytes: { type: 'integer', minimum: 1024, maximum: 10485760 }
+          },
+          required: ['url']
+        }
+      },
+      {
+        name: 'ssh_workspace',
+        description: 'Orkestrasi workspace multi-worktree terkontrol untuk beberapa task paralel pada satu repo. create membuat 1-6 branch/worktree dan manifest non-secret; status memeriksa semua task; verify menjalankan verification loop pada semua task; remove hanya jika semua worktree bersih; list menampilkan workspace tersimpan.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            action: { type: 'string', enum: ['list','create','status','verify','remove'] },
+            workspaceId: { type: 'string', description: 'ID workspace; wajib kecuali list' },
+            repoPath: { type: 'string', description: 'Path repo utama; wajib untuk create' },
+            tasks: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 6,
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  branch: { type: 'string' },
+                  baseRef: { type: 'string', description: 'Default HEAD' }
+                },
+                required: ['name','branch'],
+                additionalProperties: false
+              }
+            },
+            fetch: { type: 'boolean', description: 'Untuk create, fetch --all --prune sebelum membuat task; default true' },
+            runScripts: { type: 'array', items: { type: 'string', enum: ['typecheck','lint','test','build'] }, description: 'Untuk verify' },
+            whitelist: { type: 'array', items: { type: 'string' } },
+            blacklist: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['connectionId','action']
+        }
+      },
+      {
         name: 'ssh_disconnect',
         description: 'Tutup koneksi SSH',
         inputSchema: {
@@ -1339,6 +1616,42 @@ function createServer(sshDefaultConfig) {
         };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Repo Commit/Push Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_smoke') {
+      if (browserSmokeActive >= MAX_BROWSER_SMOKE_CONCURRENCY) {
+        return { isError: true, content: [{ type: 'text', text: 'Browser Smoke Error: browser smoke lain masih aktif' }] };
+      }
+      browserSmokeActive++;
+      try {
+        const result = await runBrowserSmoke(args, BROWSER_SMOKE_ALLOWED_HOSTS, BROWSER_SMOKE_LOCAL_PORTS);
+        const screenshot = result.screenshot;
+        const safeResult = { ...result, screenshot: screenshot ? { bytes: screenshot.length, mimeType: 'image/png' } : null };
+        const content = [{ type: 'text', text: JSON.stringify(safeResult, null, 2) }];
+        if (screenshot) {
+          assertImageBuffer(screenshot, args.maxScreenshotBytes);
+          content.push(toImageContent(screenshot, 'image/png'));
+        }
+        return { ...(result.ok ? {} : { isError: true }), content };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Browser Smoke Error: ' + err.message }] };
+      } finally {
+        browserSmokeActive--;
+      }
+    }
+
+    if (name === 'ssh_workspace') {
+      try {
+        if (args.action !== 'list' && !args.workspaceId) throw new Error('workspaceId wajib untuk action=' + args.action);
+        if (args.action === 'create' && (!args.repoPath || !args.tasks)) throw new Error('repoPath dan tasks wajib untuk action=create');
+        const result = await sshWorkspaceWorkflow(args.connectionId, args.action, args);
+        return {
+          ...(result.ok === false ? { isError: true } : {}),
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Workspace Error: ' + err.message }] };
       }
     }
 
@@ -1629,7 +1942,7 @@ document.getElementById('upload').onclick=async()=>{
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'browser_smoke', 'ssh_workspace', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
