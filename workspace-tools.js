@@ -54,8 +54,17 @@ export function normalizeWorkspaceManifest(workspaceId, parsed, treeRoot) {
     return { ...task, worktreePath: expectedPath };
   });
 
+  let projectId = null;
+  if (parsed.projectId != null) {
+    if (typeof parsed.projectId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(parsed.projectId)) {
+      throw new Error('manifest.projectId tidak valid');
+    }
+    projectId = parsed.projectId;
+  }
+
   return {
     workspaceId: id,
+    projectId,
     repoPath: parsed.repoPath,
     createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : null,
     baseCommit: typeof parsed.baseCommit === 'string' ? parsed.baseCommit : null,

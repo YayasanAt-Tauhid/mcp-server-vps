@@ -42,7 +42,7 @@ test('allowed image path blocks traversal outside configured roots', () => {
   assert.equal(isPathInside('/tmp', '/tmp/a.png'), true);
   assert.equal(isPathInside('/tmp', '/tmp2/a.png'), false);
   assert.equal(assertAllowedImagePath('/tmp/a.png', ['/tmp']), '/tmp/a.png');
-  assert.throws(() => assertAllowedImagePath('/etc/shadow.png', ['/tmp', '/home/safara/backups']), /di luar/);
+  assert.throws(() => assertAllowedImagePath('/etc/shadow.png', ['/tmp', '/srv/project/backups']), /di luar/);
 });
 
 test('device id accepts adb serial syntax and rejects shell metacharacters', () => {

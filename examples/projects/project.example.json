@@ -1,0 +1,22 @@
+{
+  "projectId": "project-x",
+  "displayName": "Project X",
+  "repoPath": "/home/app/projects/project-x/app",
+  "handbookPath": "/home/app/projects/project-x/handbook",
+  "browserHosts": [
+    "project-x.example",
+    ".project-x.example"
+  ],
+  "smokeUrls": [
+    "https://project-x.example/"
+  ],
+  "services": [
+    "project-x.service"
+  ],
+  "uploadRoots": [
+    "/home/app/projects/project-x/app/public/uploads"
+  ],
+  "imageRoots": [
+    "/home/app/projects/project-x/app/public"
+  ]
+}

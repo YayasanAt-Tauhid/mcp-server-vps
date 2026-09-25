@@ -1,0 +1,8 @@
+# Template only. The installer replaces __BROWSER_BINARY__ with the exact
+# root-owned Chromium Headless Shell path before loading the profile.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile __INSTANCE_NAME__-playwright-headless __BROWSER_BINARY__ flags=(unconfined) {
+  userns,
+}

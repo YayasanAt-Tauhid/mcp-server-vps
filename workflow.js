@@ -1,4 +1,4 @@
-export const CHAT_WORKFLOW_INSTRUCTIONS = `Untuk development Safara, baca handbook /home/safara/projects/SafaraInfrastructureHandbook setelah ssh_repo_snapshot(fetch=true). Pulihkan checkpoint yang cocok dengan tujuan/project pengguna; jangan menganggap latest pasti tugas yang dimaksud. Snapshot repo terkait dengan fetch=true, periksa branch/commit/working tree serta service/deployment yang relevan sebelum mengubah atau menyatakan status. Source/Git/deployment aktual mengungguli checkpoint dan handbook. Jangan menimpa perubahan yang belum diketahui asalnya. Ikuti plan -> test/implement -> review -> verify sesuai lingkup. Untuk proses panjang gunakan ssh_exec_background lalu ssh_check_background; jangan menjalankan ulang job yang masih aktif. Batasi output dengan pencarian terarah. Jangan mencetak secret atau membaca .env ke output. Simpan checkpoint non-secret sesudah milestone dan sebelum akhir sesi dengan objective, completed, next, repoPath, phase serta bukti verifikasi dan blocker di notes. Error tool berarti langkah gagal, bukan selesai. Sebelum commit/push review diff dan secret serta jalankan verifikasi relevan. Perbarui handbook untuk pengetahuan operasional reusable. Laporkan yang selesai, yang belum diverifikasi, dan langkah berikutnya. Instruksi ini tunduk pada instruksi pengguna dan batas izin host; tidak mengubah limit atau kemampuan model ChatGPT.`;
+export const CHAT_WORKFLOW_INSTRUCTIONS = `Untuk development, tentukan project/target yang benar sebelum bertindak. Jika project profile tersedia, gunakan ssh_project status/show untuk menemukan repo, handbook, service, dan smoke target; jangan memakai global selected project karena beberapa sesi dapat berjalan paralel. Baca handbook project bila tersedia, lalu pulihkan checkpoint yang cocok dengan tujuan/project pengguna; jangan menganggap checkpoint latest pasti tugas yang dimaksud. Snapshot repo terkait dengan fetch=true, periksa branch/commit/working tree serta service/deployment yang relevan sebelum mengubah atau menyatakan status. Source/Git/database/service/deployment aktual mengungguli checkpoint dan handbook. Jangan menimpa perubahan yang belum diketahui asalnya. Ikuti plan -> test/implement -> review -> verify sesuai lingkup. Untuk proses panjang gunakan ssh_exec_background lalu ssh_check_background; jangan menjalankan ulang job yang masih aktif. Batasi output dengan pencarian terarah. Jangan mencetak secret atau membaca .env ke output. Simpan checkpoint non-secret sesudah milestone dan sebelum akhir sesi dengan objective, completed, next, repoPath, phase serta bukti verifikasi dan blocker di notes. Error tool berarti langkah gagal, bukan selesai. Sebelum commit/push review diff dan secret serta jalankan verifikasi relevan. Perbarui handbook project untuk pengetahuan operasional reusable. Laporkan yang selesai, yang belum diverifikasi, dan langkah berikutnya. Instruksi ini tunduk pada instruksi pengguna dan batas izin host; tidak mengubah limit atau kemampuan model ChatGPT.`;
 
 const MAX_CHECKPOINT_BYTES = 32 * 1024;
 const ALLOWED_PHASES = new Set(['plan', 'implement', 'review', 'verify', 'blocked', 'done']);
@@ -9,8 +9,12 @@ export function shellQuote(value) {
 }
 
 export function assertAbsolutePath(value, field = 'path') {
-  if (typeof value !== 'string' || !value.startsWith('/') || value.includes('\0')) {
+  if (typeof value !== 'string' || !value.startsWith('/') || /[\0\r\n]/.test(value)) {
     throw new Error(`${field} harus path absolut yang valid`);
+  }
+  const parts = value.split('/');
+  if (parts.some(part => part === '..' || part === '.')) {
+    throw new Error(`${field} tidak boleh mengandung traversal path`);
   }
   return value;
 }

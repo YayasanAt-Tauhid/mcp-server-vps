@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "preflight": "node scripts/preflight.mjs --env-file .env --runtime",
+    "preflight:example": "node scripts/preflight.mjs --env-file .env.example --allow-placeholders"
   },
   "keywords": [],
   "author": "",

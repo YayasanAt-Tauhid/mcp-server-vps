@@ -176,3 +176,19 @@ test('persisted board schema rejects unknown fields and malformed events', () =>
   badEvent.events.push({ at: '2026-09-25T04:00:01.000Z', type: 'unknown-event' });
   assert.throws(() => validateAgentBoardState('b7', badEvent), /event type/);
 });
+
+test('agent board preserves workspace projectId and rejects project remap', () => {
+  const now = Date.parse('2026-09-25T05:00:00.000Z');
+  const projectWorkspace = { ...workspace, projectId: 'project-x' };
+  const board = createAgentBoardState({
+    boardId: 'b-project',
+    workspaceId: 'ws1',
+    workspaceManifest: projectWorkspace,
+    tasks: specs,
+    nowMs: now
+  });
+  assert.equal(board.projectId, 'project-x');
+  assert.equal(summarizeAgentBoard(board, now).projectId, 'project-x');
+  assert.equal(assertAgentBoardWorkspaceMapping(board, projectWorkspace), true);
+  assert.throws(() => assertAgentBoardWorkspaceMapping(board, { ...projectWorkspace, projectId: 'other' }), /tidak cocok/);
+});

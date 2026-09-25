@@ -42,9 +42,9 @@ test('checkpoint id rejects path traversal', () => {
 
 test('checkpoint normalization keeps operational metadata and rejects secrets', () => {
   const cp = normalizeCheckpoint('task-1', {
-    objective: 'Audit UI Safara',
+    objective: 'Audit project UI',
     phase: 'verify',
-    project: 'SafaraOjolNative',
+    project: 'ProjectX',
     completed: ['typecheck lulus'],
     next: ['smoke test']
   });

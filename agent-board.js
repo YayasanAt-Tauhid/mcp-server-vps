@@ -128,6 +128,7 @@ export function createAgentBoardState({ boardId, workspaceId, workspaceManifest,
     version: 1,
     boardId: id,
     workspaceId: ws,
+    projectId: workspaceManifest.projectId || null,
     repoPath: workspaceManifest.repoPath,
     createdAt,
     updatedAt: createdAt,
@@ -154,8 +155,9 @@ export function validateAgentBoardState(boardId, state) {
   if (!state || typeof state !== 'object' || Array.isArray(state) || state.version !== 1 || state.boardId !== id) {
     throw new Error('agent board state tidak valid');
   }
-  assertOnlyKeys(state, ['version','boardId','workspaceId','repoPath','createdAt','updatedAt','tasks','events'], 'agent board');
+  assertOnlyKeys(state, ['version','boardId','workspaceId','projectId','repoPath','createdAt','updatedAt','tasks','events'], 'agent board');
   assertWorkspaceId(state.workspaceId);
+  if (state.projectId != null && (typeof state.projectId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(state.projectId))) throw new Error('agent board projectId tidak valid');
   assertAbsolutePath(state.repoPath, 'agent board repoPath');
   if (typeof state.createdAt !== 'string' || !Number.isFinite(Date.parse(state.createdAt)) || typeof state.updatedAt !== 'string' || !Number.isFinite(Date.parse(state.updatedAt))) {
     throw new Error('timestamp agent board tidak valid');
@@ -366,6 +368,7 @@ export function summarizeAgentBoard(state, nowMs = Date.now()) {
   return {
     boardId: state.boardId,
     workspaceId: state.workspaceId,
+    projectId: state.projectId || null,
     repoPath: state.repoPath,
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
@@ -383,7 +386,7 @@ export function canRemoveAgentBoard(state, nowMs = Date.now()) {
 
 export function assertAgentBoardWorkspaceMapping(state, workspaceManifest) {
   validateAgentBoardState(state.boardId, state);
-  if (!workspaceManifest || workspaceManifest.workspaceId !== state.workspaceId || workspaceManifest.repoPath !== state.repoPath || !Array.isArray(workspaceManifest.tasks)) {
+  if (!workspaceManifest || workspaceManifest.workspaceId !== state.workspaceId || (workspaceManifest.projectId || null) !== (state.projectId || null) || workspaceManifest.repoPath !== state.repoPath || !Array.isArray(workspaceManifest.tasks)) {
     throw new Error('agent board tidak cocok dengan workspace aktual');
   }
   const workspaceByName = new Map(workspaceManifest.tasks.map(task => [task.name, task]));

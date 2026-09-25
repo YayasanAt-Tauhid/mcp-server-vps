@@ -35,7 +35,7 @@ test('workspace tasks normalize base refs and reject duplicates', () => {
 });
 
 test('workspace manifest accepts only canonical task paths', () => {
-  const treeRoot = '/home/safara/.mcp-workflow/workspaces/trees/ws1';
+  const treeRoot = '/home/app/.mcp-workflow/workspaces/trees/ws1';
   const manifest = normalizeWorkspaceManifest('ws1', {
     workspaceId: 'ws1',
     repoPath: '/srv/repo',
@@ -54,4 +54,25 @@ test('workspace manifest accepts only canonical task paths', () => {
       { name: 'frontend', branch: 'feat/front', baseRef: 'HEAD', worktreePath: '/srv/other-worktree' }
     ]
   }, treeRoot), /worktreePath/);
+});
+
+test('workspace manifest preserves valid projectId and rejects invalid one', () => {
+  const treeRoot = '/home/app/.mcp-workflow/workspaces/trees/ws-project';
+  const parsed = {
+    workspaceId: 'ws-project',
+    projectId: 'project-x',
+    repoPath: '/srv/project-x',
+    createdAt: '2026-09-25T05:00:00.000Z',
+    baseCommit: 'abc123',
+    tasks: [
+      { name: 'backend', branch: 'feat/back', baseRef: 'HEAD', worktreePath: treeRoot + '/backend' }
+    ]
+  };
+  const manifest = normalizeWorkspaceManifest('ws-project', parsed, treeRoot);
+  assert.equal(manifest.projectId, 'project-x');
+
+  assert.throws(() => normalizeWorkspaceManifest('ws-project', {
+    ...parsed,
+    projectId: '../bad'
+  }, treeRoot), /projectId/);
 });

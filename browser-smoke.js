@@ -118,7 +118,7 @@ export async function runBrowserSmoke(input, allowedHosts, allowedLocalPorts = [
   const publicRules = request.allowedHosts.filter(rule => !['127.0.0.1', 'localhost', '::1'].includes(rule.replace(/^\./, '')));
   const requestAllowedRules = initialIsLocal ? [initial.hostname.toLowerCase()] : publicRules;
 
-  process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.BROWSER_SMOKE_BROWSERS_PATH || '/opt/safara/playwright-browsers';
+  process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.BROWSER_SMOKE_BROWSERS_PATH || '/opt/mcp-development/playwright-browsers';
   const { chromium } = await import('playwright');
 
   let browser;

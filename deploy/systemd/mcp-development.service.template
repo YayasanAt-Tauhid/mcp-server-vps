@@ -1,0 +1,15 @@
+[Unit]
+Description=Portable MCP Development Server (__INSTANCE_NAME__)
+After=network.target
+
+[Service]
+Type=simple
+User=__MCP_USER__
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__NODE_BIN__ __INSTALL_DIR__/index.js --http
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

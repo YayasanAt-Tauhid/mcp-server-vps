@@ -35,6 +35,7 @@ import {
 } from './image-tools.js';
 import { normalizeAllowedBrowserHosts, runBrowserSmoke } from './browser-smoke.js';
 import { assertWorkspaceId, normalizeWorkspaceTasks, normalizeWorkspaceManifest } from './workspace-tools.js';
+import { assertProjectId, normalizeProjectProfile, updateProjectProfile } from './project-profile.js';
 import {
   assertAgentBoardId,
   createAgentBoardState,
@@ -59,16 +60,16 @@ try {
   });
 } catch {}
 
-const MCP_VERSION = '3.8.0';
+const MCP_VERSION = '3.9.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
-const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
+const BASE_URL = process.env.BASE_URL || 'http://127.0.0.1:3100';
 const ADB_TUNNEL_HOST = process.env.ADB_TUNNEL_HOST || '127.0.0.1';
 const ADB_TUNNEL_PORT = Number.parseInt(process.env.ADB_TUNNEL_PORT || '15037', 10);
 if (ADB_TUNNEL_HOST !== '127.0.0.1' || !Number.isInteger(ADB_TUNNEL_PORT) || ADB_TUNNEL_PORT < 1 || ADB_TUNNEL_PORT > 65535) {
   throw new Error('ADB tunnel harus menggunakan 127.0.0.1 dan port valid');
 }
-const BROWSER_SMOKE_ALLOWED_HOSTS = normalizeAllowedBrowserHosts(process.env.BROWSER_SMOKE_ALLOWED_HOSTS || 'safara.biz.id,.safara.biz.id,127.0.0.1,localhost');
+const BROWSER_SMOKE_ALLOWED_HOSTS = normalizeAllowedBrowserHosts(process.env.BROWSER_SMOKE_ALLOWED_HOSTS || '127.0.0.1,localhost');
 const BROWSER_SMOKE_LOCAL_PORTS = (process.env.BROWSER_SMOKE_LOCAL_PORTS || '3100').split(',').map(v => Number(v.trim()));
 if (!BROWSER_SMOKE_LOCAL_PORTS.length || BROWSER_SMOKE_LOCAL_PORTS.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) throw new Error('BROWSER_SMOKE_LOCAL_PORTS tidak valid');
 const MAX_BROWSER_SMOKE_CONCURRENCY = 1;
@@ -88,19 +89,10 @@ const DEFAULT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 const DEFAULT_UPLOAD_TTL_SECONDS = 10 * 60;
 const MAX_ACTIVE_UPLOAD_SLOTS = 100;
-const UPLOAD_ALLOWED_ROOTS = (process.env.UPLOAD_ALLOWED_ROOTS || [
-  '/home/safara/projects/safara/safaraojolnative-deploy/native/assets',
-  '/home/safara/projects/safara/safaraojolnative-deploy/web/public',
-  '/home/safara/projects/safara/laundry-development/native/assets',
-  '/home/safara/projects/safara/laundry-development/web/public',
-  '/home/safara/projects/SafaraLandingpage/assets'
-].join(',')).split(',').map(v => resolve(v.trim())).filter(Boolean);
-const IMAGE_READ_ALLOWED_ROOTS = (process.env.IMAGE_READ_ALLOWED_ROOTS || [
-  '/tmp',
-  '/home/safara/backups',
-  '/home/safara/projects/safara/safaraojolnative-deploy/native/assets',
-  '/home/safara/projects/safara/laundry-development/native/assets'
-].join(',')).split(',').map(v => resolve(v.trim())).filter(Boolean);
+const UPLOAD_ALLOWED_ROOTS = (process.env.UPLOAD_ALLOWED_ROOTS || '')
+  .split(',').map(v => v.trim()).filter(Boolean).map(v => resolve(v));
+const IMAGE_READ_ALLOWED_ROOTS = (process.env.IMAGE_READ_ALLOWED_ROOTS || '/tmp')
+  .split(',').map(v => v.trim()).filter(Boolean).map(v => resolve(v));
 const UPLOAD_RATE_WINDOW_MS = 60 * 1000;
 const UPLOAD_RATE_MAX_PER_IP = 20;
 const uploadRate = new Map();
@@ -117,12 +109,12 @@ function isPathInside(root, candidate) {
   return c === r || c.startsWith(r + sep);
 }
 
-function validateUploadDestination(remotePath, kind = 'image') {
+function validateUploadDestination(remotePath, kind = 'image', allowedRoots = UPLOAD_ALLOWED_ROOTS) {
   if (typeof remotePath !== 'string' || !remotePath.startsWith('/') || remotePath.includes('\0')) {
     throw new Error('remotePath harus path absolut yang valid');
   }
   const normalized = resolve(normalize(remotePath));
-  if (!UPLOAD_ALLOWED_ROOTS.some(root => isPathInside(root, normalized))) {
+  if (!Array.isArray(allowedRoots) || !allowedRoots.length || !allowedRoots.some(root => isPathInside(root, normalized))) {
     throw new Error('remotePath di luar direktori upload yang diizinkan');
   }
   if (!UPLOAD_KINDS[kind]) throw new Error('kind tidak didukung');
@@ -416,9 +408,9 @@ async function sshUploadBuffer(connectionId, buffer, remotePath, allowOverwrite 
   }
 }
 
-function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds, kind = 'image', allowOverwrite = false) {
+function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds, kind = 'image', allowOverwrite = false, allowedRoots = UPLOAD_ALLOWED_ROOTS) {
   if (!sshConfigs.has(connectionId)) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
-  const safeRemotePath = validateUploadDestination(remotePath, kind);
+  const safeRemotePath = validateUploadDestination(remotePath, kind, allowedRoots);
   const now = Date.now();
   for (const [existingToken, slot] of uploadSlots) {
     if (slot.expiresAt <= now) uploadSlots.delete(existingToken);
@@ -473,7 +465,7 @@ async function sshDownload(connectionId, remotePath, localPath) {
   }
 }
 
-async function sshReadImageBuffer(connectionId, remotePath, maxBytes) {
+async function sshReadImageBuffer(connectionId, remotePath, maxBytes, allowedRoots = IMAGE_READ_ALLOWED_ROOTS) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
   if (typeof remotePath !== 'string' || !remotePath.startsWith('/') || remotePath.includes('\0')) {
@@ -485,7 +477,7 @@ async function sshReadImageBuffer(connectionId, remotePath, maxBytes) {
     await sftp.connect(config);
     const realPath = await sftp.realPath(remotePath);
     if (!realPath) throw new Error('path gambar tidak ditemukan');
-    assertAllowedImagePath(realPath, IMAGE_READ_ALLOWED_ROOTS);
+    assertAllowedImagePath(realPath, allowedRoots);
     const stat = await sftp.stat(realPath);
     if (!stat || typeof stat.size !== 'number') throw new Error('metadata gambar tidak valid');
     if (stat.size <= 0) throw new Error('file gambar kosong');
@@ -750,6 +742,197 @@ async function sshRepoCommitPushWorkflow(connectionId, args) {
   }
 }
 
+const MAX_PROJECT_PROFILE_BYTES = 32 * 1024;
+
+async function getProjectProfilePaths(connectionId, projectId, whitelist, blacklist) {
+  const id = assertProjectId(projectId);
+  const home = await getRemoteHome(connectionId, whitelist, blacklist);
+  const dir = `${home}/.mcp-workflow/projects`;
+  return { dir, file: `${dir}/${id}.json` };
+}
+
+async function readProjectProfile(connectionId, projectId, whitelist, blacklist) {
+  const paths = await getProjectProfilePaths(connectionId, projectId, whitelist, blacklist);
+  const output = await workflowExec(
+    connectionId,
+    `if [ ! -f ${workflowShellQuote(paths.file)} ]; then echo 'project profile tidak ditemukan' >&2; exit 48; fi; cat -- ${workflowShellQuote(paths.file)}`,
+    whitelist,
+    blacklist
+  );
+  let parsed;
+  try { parsed = JSON.parse(output); } catch { throw new Error('project profile JSON rusak'); }
+  return { paths, profile: normalizeProjectProfile(parsed, { now: parsed.updatedAt || parsed.createdAt }) };
+}
+
+async function writeProjectProfile(connectionId, paths, profile, whitelist, blacklist) {
+  const normalized = normalizeProjectProfile(profile, { now: profile.updatedAt || profile.createdAt });
+  const serialized = JSON.stringify(normalized, null, 2) + '\n';
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_PROJECT_PROFILE_BYTES) throw new Error('project profile terlalu besar');
+  if (containsSecretLike(serialized)) throw new Error('project profile ditolak karena pola secret/credential');
+  const temp = `${paths.file}.tmp-${crypto.randomBytes(8).toString('hex')}`;
+  await workflowExec(
+    connectionId,
+    `umask 077; mkdir -p -- ${workflowShellQuote(paths.dir)}; chmod 700 -- ${workflowShellQuote(paths.dir)}`,
+    whitelist,
+    blacklist
+  );
+  try {
+    await sshWriteFile(connectionId, temp, serialized, 'utf8');
+    await workflowExec(
+      connectionId,
+      `chmod 600 -- ${workflowShellQuote(temp)}; mv -f -- ${workflowShellQuote(temp)} ${workflowShellQuote(paths.file)}; chmod 600 -- ${workflowShellQuote(paths.file)}`,
+      whitelist,
+      blacklist
+    );
+  } catch (err) {
+    await workflowExec(connectionId, `rm -f -- ${workflowShellQuote(temp)}`, whitelist, blacklist).catch(() => {});
+    throw err;
+  }
+  return normalized;
+}
+
+async function getProjectServiceStatus(connectionId, service, whitelist, blacklist) {
+  try {
+    const output = await workflowExec(
+      connectionId,
+      `systemctl show --no-pager -p LoadState -p ActiveState -p SubState -- ${workflowShellQuote(service)}`,
+      whitelist,
+      blacklist
+    );
+    const values = {};
+    for (const line of output.split(/\r?\n/)) {
+      const i = line.indexOf('=');
+      if (i > 0) values[line.slice(0, i)] = line.slice(i + 1);
+    }
+    return {
+      service,
+      ok: values.LoadState === 'loaded',
+      loadState: values.LoadState || null,
+      activeState: values.ActiveState || null,
+      subState: values.SubState || null
+    };
+  } catch (err) {
+    return { service, ok: false, error: truncateText(err.message, 1000) };
+  }
+}
+
+async function sshProjectWorkflow(connectionId, action, args) {
+  const allowed = ['list', 'create', 'update', 'show', 'status', 'verify', 'smoke'];
+  if (!allowed.includes(action)) throw new Error('action project tidak valid');
+  const whitelist = args.whitelist;
+  const blacklist = args.blacklist;
+
+  if (action === 'list') {
+    const home = await getRemoteHome(connectionId, whitelist, blacklist);
+    const dir = `${home}/.mcp-workflow/projects`;
+    const output = await workflowExec(
+      connectionId,
+      `if [ -d ${workflowShellQuote(dir)} ]; then find ${workflowShellQuote(dir)} -maxdepth 1 -type f -name '*.json' -printf '%T@ %f\\n' | sort -nr | head -100; fi`,
+      whitelist,
+      blacklist
+    );
+    return {
+      projects: output.split(/\r?\n/).filter(Boolean).map(line => {
+        const firstSpace = line.indexOf(' ');
+        const stamp = firstSpace >= 0 ? Number(line.slice(0, firstSpace)) : NaN;
+        const file = firstSpace >= 0 ? line.slice(firstSpace + 1) : line;
+        return {
+          projectId: file.replace(/\.json$/, ''),
+          modifiedAt: Number.isFinite(stamp) ? new Date(stamp * 1000).toISOString() : null
+        };
+      })
+    };
+  }
+
+  if (action === 'create') {
+    if (!args.profile) throw new Error('profile wajib untuk create');
+    const profile = normalizeProjectProfile(args.profile);
+    const paths = await getProjectProfilePaths(connectionId, profile.projectId, whitelist, blacklist);
+    await workflowExec(
+      connectionId,
+      `if [ -e ${workflowShellQuote(paths.file)} ]; then echo 'project profile sudah ada' >&2; exit 49; fi`,
+      whitelist,
+      blacklist
+    );
+    const saved = await writeProjectProfile(connectionId, paths, profile, whitelist, blacklist);
+    return { ok: true, action, profile: saved };
+  }
+
+  const projectId = assertProjectId(args.projectId);
+  const { paths, profile } = await readProjectProfile(connectionId, projectId, whitelist, blacklist);
+
+  if (action === 'update') {
+    if (!args.patch) throw new Error('patch wajib untuk update');
+    const updated = updateProjectProfile(profile, args.patch);
+    const saved = await writeProjectProfile(connectionId, paths, updated, whitelist, blacklist);
+    return { ok: true, action, profile: saved };
+  }
+
+  if (action === 'show') return { ok: true, action, profile };
+
+  if (action === 'status') {
+    const repo = await sshRepoSnapshotWorkflow(connectionId, profile.repoPath, args.fetch !== false, whitelist, blacklist);
+    let handbook = null;
+    if (profile.handbookPath) {
+      try {
+        handbook = await sshRepoSnapshotWorkflow(connectionId, profile.handbookPath, args.fetch !== false, whitelist, blacklist);
+      } catch (err) {
+        handbook = { ok: false, error: truncateText(err.message, 2000) };
+      }
+    }
+    const services = [];
+    for (const service of profile.services) {
+      services.push(await getProjectServiceStatus(connectionId, service, whitelist, blacklist));
+    }
+    return { ok: true, action, profile, repo, handbook, services };
+  }
+
+  if (action === 'verify') {
+    const verification = await sshRepoVerifyWorkflow(
+      connectionId,
+      profile.repoPath,
+      args.runScripts || [],
+      whitelist,
+      blacklist
+    );
+    let handbook = null;
+    if (profile.handbookPath) {
+      try {
+        const snap = await sshRepoSnapshotWorkflow(connectionId, profile.handbookPath, false, whitelist, blacklist);
+        handbook = {
+          ok: !String(snap.status || '').split(/\r?\n/).some(line => line && !line.startsWith('##')),
+          snapshot: snap
+        };
+      } catch (err) {
+        handbook = { ok: false, error: truncateText(err.message, 2000) };
+      }
+    }
+    return {
+      ok: verification.ok && (!handbook || handbook.ok),
+      action,
+      projectId,
+      verification,
+      handbook
+    };
+  }
+
+  if (!profile.smokeUrls.length || !profile.browserHosts.length) {
+    throw new Error('project profile belum memiliki browserHosts/smokeUrls');
+  }
+  const smokeUrl = args.url || profile.smokeUrls[0];
+  if (!profile.smokeUrls.includes(smokeUrl)) throw new Error('url smoke harus terdaftar pada project profile');
+  const result = await runBrowserSmoke({
+    url: smokeUrl,
+    expectedStatus: args.expectedStatus,
+    expectedText: args.expectedText,
+    expectedTitle: args.expectedTitle,
+    timeoutMs: args.timeoutMs,
+    screenshot: args.screenshot,
+    maxScreenshotBytes: args.maxScreenshotBytes
+  }, profile.browserHosts, BROWSER_SMOKE_LOCAL_PORTS);
+  return { ok: result.ok, action, projectId, profile: { projectId, displayName: profile.displayName }, ...result };
+}
+
 async function getWorkspaceBase(connectionId, whitelist, blacklist) {
   const home = await getRemoteHome(connectionId, whitelist, blacklist);
   return `${home}/.mcp-workflow/workspaces`;
@@ -812,7 +995,15 @@ async function sshWorkspaceWorkflow(connectionId, action, args) {
   const workspaceId = assertWorkspaceId(args.workspaceId);
 
   if (action === 'create') {
-    assertAbsolutePath(args.repoPath, 'repoPath');
+    let projectId = null;
+    let repoPath = args.repoPath;
+    if (args.projectId) {
+      projectId = assertProjectId(args.projectId);
+      const { profile } = await readProjectProfile(connectionId, projectId, whitelist, blacklist);
+      if (repoPath && repoPath !== profile.repoPath) throw new Error('repoPath tidak cocok dengan project profile');
+      repoPath = profile.repoPath;
+    }
+    assertAbsolutePath(repoPath, 'repoPath');
     const tasks = normalizeWorkspaceTasks(args.tasks);
     const paths = await getWorkspacePaths(connectionId, workspaceId, whitelist, blacklist);
     await workflowExec(
@@ -825,12 +1016,12 @@ async function sshWorkspaceWorkflow(connectionId, action, args) {
     const created = [];
     let snapshot = null;
     try {
-      snapshot = await sshRepoSnapshotWorkflow(connectionId, args.repoPath, args.fetch !== false, whitelist, blacklist);
+      snapshot = await sshRepoSnapshotWorkflow(connectionId, repoPath, args.fetch !== false, whitelist, blacklist);
       for (const task of tasks) {
         const worktreePath = `${paths.treeRoot}/${task.name}`;
         await workflowExec(
           connectionId,
-          buildRepoWorktreeCommand(args.repoPath, 'create', {
+          buildRepoWorktreeCommand(repoPath, 'create', {
             worktreePath,
             branch: task.branch,
             baseRef: task.baseRef,
@@ -844,7 +1035,8 @@ async function sshWorkspaceWorkflow(connectionId, action, args) {
 
       const manifest = {
         workspaceId,
-        repoPath: args.repoPath,
+        projectId,
+        repoPath,
         createdAt: new Date().toISOString(),
         baseCommit: snapshot.commit,
         tasks: created
@@ -858,13 +1050,13 @@ async function sshWorkspaceWorkflow(connectionId, action, args) {
         try {
           await workflowExec(
             connectionId,
-            buildRepoWorktreeCommand(args.repoPath, 'remove', { worktreePath: task.worktreePath }),
+            buildRepoWorktreeCommand(repoPath, 'remove', { worktreePath: task.worktreePath }),
             whitelist,
             blacklist
           );
           await workflowExec(
             connectionId,
-            `cd ${workflowShellQuote(args.repoPath)} && git branch -D -- ${workflowShellQuote(task.branch)}`,
+            `cd ${workflowShellQuote(repoPath)} && git branch -D -- ${workflowShellQuote(task.branch)}`,
             whitelist,
             blacklist
           );
@@ -896,7 +1088,7 @@ async function sshWorkspaceWorkflow(connectionId, action, args) {
         tasks.push({ ...task, ok: false, error: truncateText(err.message, 2000) });
       }
     }
-    return { ok: tasks.every(t => t.ok), action, workspaceId, repoPath: manifest.repoPath, tasks };
+    return { ok: tasks.every(t => t.ok), action, workspaceId, projectId: manifest.projectId || null, repoPath: manifest.repoPath, tasks };
   }
 
   if (action === 'verify') {
@@ -929,6 +1121,7 @@ async function sshWorkspaceWorkflow(connectionId, action, args) {
       ok: results.every(r => r.ok),
       action,
       workspaceId,
+      projectId: manifest.projectId || null,
       repoPath: manifest.repoPath,
       concurrency: WORKSPACE_VERIFY_CONCURRENCY,
       tasks: results
@@ -1260,11 +1453,12 @@ function createServer(sshDefaultConfig) {
       },
       {
         name: 'ssh_create_upload_slot',
-        description: 'PILIHAN WAJIB/UTAMA untuk transfer file binary dari Work/cloud workspace ke Safara. Buat URL upload browser satu-kali pakai agar PNG/JPG/WebP/PDF/ZIP/APK dikirim sebagai binary langsung tanpa Base64/token bloat. JANGAN kirim binary lewat ssh_write_file encoding=base64 selama tool ini tersedia. Gunakan Base64 hanya sebagai fallback terakhir bila upload slot benar-benar tidak dapat digunakan.',
+        description: 'PILIHAN WAJIB/UTAMA untuk transfer file binary dari Work/cloud workspace ke target SSH/project. Buat URL upload browser satu-kali pakai agar PNG/JPG/WebP/PDF/ZIP/APK dikirim sebagai binary langsung tanpa Base64/token bloat. JANGAN kirim binary lewat ssh_write_file encoding=base64 selama tool ini tersedia. Gunakan Base64 hanya sebagai fallback terakhir bila upload slot benar-benar tidak dapat digunakan.',
         inputSchema: {
           type: 'object',
           properties: {
             connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            projectId: { type: 'string', description: 'Optional project profile; bila diisi, uploadRoots profile menjadi allowlist path' },
             remotePath: { type: 'string', description: 'Path tujuan final di server remote; dikunci ke slot ini' },
             maxBytes: { type: 'number', description: 'Batas ukuran file, default 20 MiB, maksimum 25 MiB' },
             expiresInSeconds: { type: 'number', description: 'Masa berlaku slot, default 600 detik; rentang 60..3600' },
@@ -1308,6 +1502,7 @@ function createServer(sshDefaultConfig) {
           type: 'object',
           properties: {
             connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            projectId: { type: 'string', description: 'Optional project profile; bila diisi, imageRoots profile menjadi allowlist path' },
             remotePath: { type: 'string', description: 'Path absolut PNG/JPEG/WebP pada direktori gambar yang diizinkan' },
             maxBytes: { type: 'number', description: 'Batas ukuran gambar, default 5 MiB dan maksimum 10 MiB' }
           },
@@ -1316,7 +1511,7 @@ function createServer(sshDefaultConfig) {
       },
       {
         name: 'adb_screenshot_visual',
-        description: 'Ambil screenshot perangkat Android yang sudah terhubung melalui reverse ADB loopback Safara lalu kembalikan sebagai MCP ImageContent. Gunakan hanya untuk pengujian Safara yang diotorisasi pengguna; tool tidak memberi akses live video dan deviceId wajib eksplisit.',
+        description: 'Ambil screenshot perangkat Android yang sudah terhubung melalui reverse ADB loopback lalu kembalikan sebagai MCP ImageContent. Gunakan hanya untuk perangkat/pengujian yang diotorisasi pengguna; tool tidak memberi akses live video dan deviceId wajib eksplisit.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1538,12 +1733,60 @@ function createServer(sshDefaultConfig) {
         }
       },
       {
-        name: 'browser_smoke',
-        description: 'Render smoke test Safara dengan Playwright Chromium headless pada domain allowlist. Tidak melakukan login/form action dan memblokir request keluar allowlist. Dapat memeriksa status/text/title serta mengembalikan screenshot viewport.',
+        name: 'ssh_project',
+        description: 'Registry project portable pada target SSH. Profile non-secret menyimpan repo, handbook, browser hosts/smoke URLs, service, dan allowed roots. Mendukung list/create/update/show/status/verify/smoke. Tidak menjalankan deploy otomatis.',
         inputSchema: {
           type: 'object',
           properties: {
-            url: { type: 'string', description: 'URL Safara yang akan dirender' },
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            action: { type: 'string', enum: ['list','create','update','show','status','verify','smoke'] },
+            projectId: { type: 'string', description: 'Lowercase project slug; wajib kecuali list/create' },
+            profile: {
+              type: 'object',
+              description: 'Profile non-secret untuk create',
+              properties: {
+                projectId: { type: 'string' },
+                displayName: { type: 'string' },
+                repoPath: { type: 'string' },
+                handbookPath: { type: ['string','null'] },
+                browserHosts: { type: 'array', items: { type: 'string' }, maxItems: 30 },
+                smokeUrls: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+                services: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+                uploadRoots: { type: 'array', items: { type: 'string' }, maxItems: 20 },
+                imageRoots: { type: 'array', items: { type: 'string' }, maxItems: 20 }
+              },
+              required: ['projectId','repoPath'],
+              additionalProperties: false
+            },
+            patch: { type: 'object', description: 'Partial profile untuk update; projectId/createdAt tidak boleh diubah' },
+            fetch: { type: 'boolean', description: 'Fetch repo/handbook saat status; default true' },
+            runScripts: { type: 'array', items: { type: 'string', enum: ['typecheck','lint','test','build'] } },
+            url: { type: 'string', description: 'Untuk smoke; harus salah satu smokeUrls profile' },
+            expectedStatus: {
+              oneOf: [
+                { type: 'integer', minimum: 100, maximum: 599 },
+                { type: 'array', minItems: 1, maxItems: 10, items: { type: 'integer', minimum: 100, maximum: 599 } }
+              ]
+            },
+            expectedText: { type: 'string' },
+            expectedTitle: { type: 'string' },
+            timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000 },
+            screenshot: { type: 'boolean' },
+            maxScreenshotBytes: { type: 'integer', minimum: 1024, maximum: 10485760 },
+            whitelist: { type: 'array', items: { type: 'string' } },
+            blacklist: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['connectionId','action'],
+          additionalProperties: false
+        }
+      },
+      {
+        name: 'browser_smoke',
+        description: 'Render smoke test web dengan Playwright Chromium headless pada domain allowlist. Tidak melakukan login/form action dan memblokir request keluar allowlist. Dapat memeriksa status/text/title serta mengembalikan screenshot viewport.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'URL yang akan dirender; wajib berada pada allowlist browser' },
             expectedStatus: {
               oneOf: [
                 { type: 'integer', minimum: 100, maximum: 599 },
@@ -1568,7 +1811,8 @@ function createServer(sshDefaultConfig) {
             connectionId: { type: 'string', description: 'ID koneksi SSH' },
             action: { type: 'string', enum: ['list','create','status','verify','remove'] },
             workspaceId: { type: 'string', description: 'ID workspace; wajib kecuali list' },
-            repoPath: { type: 'string', description: 'Path repo utama; wajib untuk create' },
+            projectId: { type: 'string', description: 'Optional project profile; bila diisi, repoPath diambil dari profile dan repoPath mismatch ditolak' },
+            repoPath: { type: 'string', description: 'Path repo utama; wajib untuk create jika projectId tidak diisi' },
             tasks: {
               type: 'array',
               minItems: 1,
@@ -1759,7 +2003,21 @@ function createServer(sshDefaultConfig) {
 
     if (name === 'ssh_create_upload_slot') {
       try {
-        const result = createUploadSlot(args.connectionId, args.remotePath, args.maxBytes, args.expiresInSeconds, args.kind || 'image', args.allowOverwrite || false);
+        let allowedRoots = UPLOAD_ALLOWED_ROOTS;
+        if (args.projectId) {
+          const { profile } = await readProjectProfile(args.connectionId, args.projectId);
+          if (!profile.uploadRoots.length) throw new Error('project profile belum memiliki uploadRoots');
+          allowedRoots = profile.uploadRoots;
+        }
+        const result = createUploadSlot(
+          args.connectionId,
+          args.remotePath,
+          args.maxBytes,
+          args.expiresInSeconds,
+          args.kind || 'image',
+          args.allowOverwrite || false,
+          allowedRoots
+        );
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Create Upload Slot Error: ' + err.message }] };
@@ -1786,7 +2044,13 @@ function createServer(sshDefaultConfig) {
 
     if (name === 'ssh_read_image') {
       try {
-        const result = await sshReadImageBuffer(args.connectionId, args.remotePath, args.maxBytes);
+        let allowedRoots = IMAGE_READ_ALLOWED_ROOTS;
+        if (args.projectId) {
+          const { profile } = await readProjectProfile(args.connectionId, args.projectId);
+          if (!profile.imageRoots.length) throw new Error('project profile belum memiliki imageRoots');
+          allowedRoots = profile.imageRoots;
+        }
+        const result = await sshReadImageBuffer(args.connectionId, args.remotePath, args.maxBytes, allowedRoots);
         return {
           content: [
             { type: 'text', text: `Image siap: ${result.realPath} (${result.size} bytes, ${result.mimeType})` },
@@ -1885,6 +2149,41 @@ function createServer(sshDefaultConfig) {
       }
     }
 
+    if (name === 'ssh_project') {
+      if (args.action === 'smoke') {
+        if (browserSmokeActive >= MAX_BROWSER_SMOKE_CONCURRENCY) {
+          return { isError: true, content: [{ type: 'text', text: 'Project Smoke Error: browser smoke lain masih aktif' }] };
+        }
+        browserSmokeActive++;
+        try {
+          if (!args.projectId) throw new Error('projectId wajib untuk action=smoke');
+          const result = await sshProjectWorkflow(args.connectionId, args.action, args);
+          const screenshot = result.screenshot;
+          const safeResult = { ...result, screenshot: screenshot ? { bytes: screenshot.length, mimeType: 'image/png' } : null };
+          const content = [{ type: 'text', text: JSON.stringify(safeResult, null, 2) }];
+          if (screenshot) {
+            assertImageBuffer(screenshot, args.maxScreenshotBytes);
+            content.push(toImageContent(screenshot, 'image/png'));
+          }
+          return { ...(result.ok ? {} : { isError: true }), content };
+        } catch (err) {
+          return { isError: true, content: [{ type: 'text', text: 'Project Smoke Error: ' + err.message }] };
+        } finally {
+          browserSmokeActive--;
+        }
+      }
+      try {
+        if (!['list','create'].includes(args.action) && !args.projectId) throw new Error('projectId wajib untuk action=' + args.action);
+        const result = await sshProjectWorkflow(args.connectionId, args.action, args);
+        return {
+          ...(result.ok === false ? { isError: true } : {}),
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Project Error: ' + err.message }] };
+      }
+    }
+
     if (name === 'browser_smoke') {
       if (browserSmokeActive >= MAX_BROWSER_SMOKE_CONCURRENCY) {
         return { isError: true, content: [{ type: 'text', text: 'Browser Smoke Error: browser smoke lain masih aktif' }] };
@@ -1910,7 +2209,7 @@ function createServer(sshDefaultConfig) {
     if (name === 'ssh_workspace') {
       try {
         if (args.action !== 'list' && !args.workspaceId) throw new Error('workspaceId wajib untuk action=' + args.action);
-        if (args.action === 'create' && (!args.repoPath || !args.tasks)) throw new Error('repoPath dan tasks wajib untuk action=create');
+        if (args.action === 'create' && (!args.tasks || (!args.projectId && !args.repoPath))) throw new Error('tasks dan projectId atau repoPath wajib untuk action=create');
         const result = await sshWorkspaceWorkflow(args.connectionId, args.action, args);
         return {
           ...(result.ok === false ? { isError: true } : {}),
@@ -2114,9 +2413,9 @@ if (cliArgs.includes('--http')) {
     res.set('Content-Security-Policy', "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'");
     res.type('html').send(`<!doctype html>
 <html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Safara MCP File Upload</title></head>
+<title>MCP File Upload</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 18px">
-<h1>Safara MCP File Upload</h1>
+<h1>MCP File Upload</h1>
 <p>Pilih file dari workspace Work. File akan dikirim sebagai binary langsung ke VPS tanpa Base64.</p>
 <input id="file" type="file"><button id="upload" type="button">Upload</button>
 <pre id="status" style="white-space:pre-wrap"></pre>
@@ -2221,7 +2520,7 @@ document.getElementById('upload').onclick=async()=>{
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_project', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
