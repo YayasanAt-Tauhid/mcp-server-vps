@@ -21,6 +21,7 @@ import {
   buildRepoCommitCommand,
   buildRepoPushCommand,
   normalizeCheckpoint,
+  containsSecretLike,
   parseTaggedOutput,
   shellQuote as workflowShellQuote,
   truncateText
@@ -34,6 +35,19 @@ import {
 } from './image-tools.js';
 import { normalizeAllowedBrowserHosts, runBrowserSmoke } from './browser-smoke.js';
 import { assertWorkspaceId, normalizeWorkspaceTasks, normalizeWorkspaceManifest } from './workspace-tools.js';
+import {
+  assertAgentBoardId,
+  createAgentBoardState,
+  validateAgentBoardState,
+  expireAgentLeases,
+  claimAgentTask,
+  heartbeatAgentTask,
+  submitAgentTask,
+  releaseAgentTask,
+  summarizeAgentBoard,
+  canRemoveAgentBoard,
+  assertAgentBoardWorkspaceMapping
+} from './agent-board.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -45,7 +59,7 @@ try {
   });
 } catch {}
 
-const MCP_VERSION = '3.7.0';
+const MCP_VERSION = '3.8.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
@@ -61,6 +75,8 @@ const MAX_BROWSER_SMOKE_CONCURRENCY = 1;
 const WORKSPACE_VERIFY_CONCURRENCY = Number(process.env.WORKSPACE_VERIFY_CONCURRENCY || '2');
 if (!Number.isInteger(WORKSPACE_VERIFY_CONCURRENCY) || WORKSPACE_VERIFY_CONCURRENCY < 1 || WORKSPACE_VERIFY_CONCURRENCY > 3) throw new Error('WORKSPACE_VERIFY_CONCURRENCY harus 1-3');
 let browserSmokeActive = 0;
+const agentBoardLocks = new Map();
+const MAX_AGENT_BOARD_BYTES = 128 * 1024;
 
 // SSH connection pool
 const sshConnections = new Map();
@@ -947,6 +963,216 @@ async function sshWorkspaceWorkflow(connectionId, action, args) {
   return { ok: true, action, workspaceId, removedTasks: manifest.tasks.map(t => t.name), branchesPreserved: true };
 }
 
+function agentBoardLockKey(connectionId, boardId) {
+  const config = sshConfigs.get(connectionId);
+  if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
+  return `${config.username || ''}@${config.host || ''}:${config.port || 22}:${assertAgentBoardId(boardId)}`;
+}
+
+async function withAgentBoardLock(connectionId, boardId, fn) {
+  const key = agentBoardLockKey(connectionId, boardId);
+  const previous = agentBoardLocks.get(key) || Promise.resolve();
+  let release;
+  const ticket = new Promise(resolveTicket => { release = resolveTicket; });
+  const tail = previous.then(() => ticket);
+  agentBoardLocks.set(key, tail);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (agentBoardLocks.get(key) === tail) agentBoardLocks.delete(key);
+  }
+}
+
+async function getAgentBoardPaths(connectionId, boardId, whitelist, blacklist) {
+  const id = assertAgentBoardId(boardId);
+  const home = await getRemoteHome(connectionId, whitelist, blacklist);
+  const dir = `${home}/.mcp-workflow/agent-boards`;
+  return { dir, file: `${dir}/${id}.json` };
+}
+
+async function readAgentBoardState(connectionId, boardId, whitelist, blacklist) {
+  const paths = await getAgentBoardPaths(connectionId, boardId, whitelist, blacklist);
+  const output = await workflowExec(
+    connectionId,
+    `if [ ! -f ${workflowShellQuote(paths.file)} ]; then echo 'agent board tidak ditemukan' >&2; exit 46; fi; cat -- ${workflowShellQuote(paths.file)}`,
+    whitelist,
+    blacklist
+  );
+  let state;
+  try { state = JSON.parse(output); } catch { throw new Error('agent board JSON rusak'); }
+  return { paths, state: validateAgentBoardState(boardId, state) };
+}
+
+async function writeAgentBoardState(connectionId, paths, state, whitelist, blacklist) {
+  validateAgentBoardState(state.boardId, state);
+  const serialized = JSON.stringify(state, null, 2) + '\n';
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_AGENT_BOARD_BYTES) {
+    throw new Error('agent board terlalu besar');
+  }
+  if (containsSecretLike(serialized)) {
+    throw new Error('agent board ditolak karena terdeteksi pola secret/credential');
+  }
+  const temp = `${paths.file}.tmp-${crypto.randomBytes(8).toString('hex')}`;
+  await workflowExec(
+    connectionId,
+    `umask 077; mkdir -p -- ${workflowShellQuote(paths.dir)}; chmod 700 -- ${workflowShellQuote(paths.dir)}`,
+    whitelist,
+    blacklist
+  );
+  try {
+    await sshWriteFile(connectionId, temp, serialized, 'utf8');
+    await workflowExec(
+      connectionId,
+      `chmod 600 -- ${workflowShellQuote(temp)}; mv -f -- ${workflowShellQuote(temp)} ${workflowShellQuote(paths.file)}; chmod 600 -- ${workflowShellQuote(paths.file)}`,
+      whitelist,
+      blacklist
+    );
+  } catch (err) {
+    await workflowExec(connectionId, `rm -f -- ${workflowShellQuote(temp)}`, whitelist, blacklist).catch(() => {});
+    throw err;
+  }
+}
+
+function snapshotIsDirty(snapshot) {
+  return String(snapshot.status || '').split(/\r?\n/).some(line => line && !line.startsWith('##'));
+}
+
+async function sshAgentBoardWorkflow(connectionId, action, args) {
+  const allowed = ['list', 'create', 'status', 'claim', 'heartbeat', 'submit', 'release', 'remove'];
+  if (!allowed.includes(action)) throw new Error('action agent board tidak valid');
+  const whitelist = args.whitelist;
+  const blacklist = args.blacklist;
+
+  if (action === 'list') {
+    const home = await getRemoteHome(connectionId, whitelist, blacklist);
+    const dir = `${home}/.mcp-workflow/agent-boards`;
+    const output = await workflowExec(
+      connectionId,
+      `if [ -d ${workflowShellQuote(dir)} ]; then find ${workflowShellQuote(dir)} -maxdepth 1 -type f -name '*.json' -printf '%T@ %f\\n' | sort -nr | head -50; fi`,
+      whitelist,
+      blacklist
+    );
+    return {
+      boards: output.split(/\r?\n/).filter(Boolean).map(line => {
+        const firstSpace = line.indexOf(' ');
+        const stamp = firstSpace >= 0 ? Number(line.slice(0, firstSpace)) : NaN;
+        const file = firstSpace >= 0 ? line.slice(firstSpace + 1) : line;
+        return {
+          boardId: file.replace(/\.json$/, ''),
+          modifiedAt: Number.isFinite(stamp) ? new Date(stamp * 1000).toISOString() : null
+        };
+      })
+    };
+  }
+
+  const boardId = assertAgentBoardId(args.boardId);
+  return withAgentBoardLock(connectionId, boardId, async () => {
+    if (action === 'create') {
+      if (!args.workspaceId || !args.tasks) throw new Error('workspaceId dan tasks wajib untuk create');
+      const { manifest } = await loadWorkspaceManifest(connectionId, args.workspaceId, whitelist, blacklist);
+      const paths = await getAgentBoardPaths(connectionId, boardId, whitelist, blacklist);
+      await workflowExec(
+        connectionId,
+        `if [ -e ${workflowShellQuote(paths.file)} ]; then echo 'agent board sudah ada' >&2; exit 47; fi`,
+        whitelist,
+        blacklist
+      );
+      const state = createAgentBoardState({
+        boardId,
+        workspaceId: args.workspaceId,
+        workspaceManifest: manifest,
+        tasks: args.tasks
+      });
+      await writeAgentBoardState(connectionId, paths, state, whitelist, blacklist);
+      return { ok: true, action, board: summarizeAgentBoard(state) };
+    }
+
+    const { paths, state } = await readAgentBoardState(connectionId, boardId, whitelist, blacklist);
+    const { manifest: currentWorkspace } = await loadWorkspaceManifest(
+      connectionId,
+      state.workspaceId,
+      whitelist,
+      blacklist
+    );
+    assertAgentBoardWorkspaceMapping(state, currentWorkspace);
+
+    if (action === 'status') {
+      if (expireAgentLeases(state)) await writeAgentBoardState(connectionId, paths, state, whitelist, blacklist);
+      return { ok: true, action, board: summarizeAgentBoard(state) };
+    }
+
+    if (action === 'claim') {
+      if (!args.agentId) throw new Error('agentId wajib untuk claim');
+      const task = claimAgentTask(state, {
+        agentId: args.agentId,
+        taskName: args.taskName,
+        leaseSeconds: args.leaseSeconds
+      });
+      const snapshot = await sshRepoSnapshotWorkflow(connectionId, task.worktreePath, false, whitelist, blacklist);
+      if (snapshot.branch !== task.branch) throw new Error('branch worktree tidak cocok dengan agent board');
+      if (snapshotIsDirty(snapshot)) throw new Error('worktree task tidak bersih; claim ditolak');
+      await writeAgentBoardState(connectionId, paths, state, whitelist, blacklist);
+      return { ok: true, action, task, snapshot, board: summarizeAgentBoard(state) };
+    }
+
+    if (action === 'heartbeat') {
+      if (!args.agentId || !args.taskName) throw new Error('agentId dan taskName wajib untuk heartbeat');
+      const task = heartbeatAgentTask(state, {
+        agentId: args.agentId,
+        taskName: args.taskName,
+        leaseSeconds: args.leaseSeconds
+      });
+      await writeAgentBoardState(connectionId, paths, state, whitelist, blacklist);
+      return { ok: true, action, task, board: summarizeAgentBoard(state) };
+    }
+
+    if (action === 'submit') {
+      if (!args.agentId || !args.taskName || !args.summary) throw new Error('agentId, taskName, dan summary wajib untuk submit');
+      const taskBefore = state.tasks.find(task => task.name === args.taskName);
+      if (!taskBefore) throw new Error('task tidak ditemukan: ' + args.taskName);
+      const snapshot = await sshRepoSnapshotWorkflow(connectionId, taskBefore.worktreePath, false, whitelist, blacklist);
+      if (snapshot.branch !== taskBefore.branch) throw new Error('branch worktree tidak cocok dengan agent board');
+      if (snapshotIsDirty(snapshot)) throw new Error('worktree task masih memiliki perubahan; commit/review sebelum submit');
+      if (args.commit && !snapshot.commit.toLowerCase().startsWith(String(args.commit).toLowerCase())) {
+        throw new Error('commit submit tidak cocok dengan HEAD worktree');
+      }
+      const task = submitAgentTask(state, {
+        agentId: args.agentId,
+        taskName: args.taskName,
+        summary: args.summary,
+        commit: snapshot.commit,
+        evidence: args.evidence
+      });
+      await writeAgentBoardState(connectionId, paths, state, whitelist, blacklist);
+      return { ok: true, action, task, snapshot, board: summarizeAgentBoard(state) };
+    }
+
+    if (action === 'release') {
+      if (!args.agentId || !args.taskName) throw new Error('agentId dan taskName wajib untuk release');
+      const task = releaseAgentTask(state, {
+        agentId: args.agentId,
+        taskName: args.taskName,
+        note: args.note
+      });
+      await writeAgentBoardState(connectionId, paths, state, whitelist, blacklist);
+      return { ok: true, action, task, board: summarizeAgentBoard(state) };
+    }
+
+    if (!canRemoveAgentBoard(state)) {
+      throw new Error('agent board remove ditolak; semua task harus selesai dan tidak ada claim aktif');
+    }
+    await workflowExec(
+      connectionId,
+      `rm -f -- ${workflowShellQuote(paths.file)}; rmdir --ignore-fail-on-non-empty ${workflowShellQuote(paths.dir)} 2>/dev/null || true`,
+      whitelist,
+      blacklist
+    );
+    return { ok: true, action, boardId, removed: true };
+  });
+}
+
 // Auth & rate limiting
 const authCodes = new Map();
 const accessTokens = new Map();
@@ -1367,6 +1593,46 @@ function createServer(sshDefaultConfig) {
         }
       },
       {
+        name: 'ssh_agent_board',
+        description: 'Koordinasi multi-session agent pada workspace Git tanpa menjalankan model LLM di VPS. create memetakan task workspace ke role/objective/dependency; claim memakai lease eksklusif; heartbeat memperpanjang lease; submit hanya menerima worktree bersih dan merekam HEAD aktual; release mengembalikan task ke antrean; remove hanya setelah semua task selesai. Tool ini tidak auto-merge, auto-deploy, atau auto-spawn model.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            action: { type: 'string', enum: ['list','create','status','claim','heartbeat','submit','release','remove'] },
+            boardId: { type: 'string', description: 'ID agent board; wajib kecuali list' },
+            workspaceId: { type: 'string', description: 'Workspace existing; wajib untuk create' },
+            tasks: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 6,
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: 'Harus sama dengan task name pada workspace' },
+                  role: { type: 'string', description: 'Role agent, default implementer' },
+                  objective: { type: 'string', description: 'Instruksi non-secret task' },
+                  dependsOn: { type: 'array', items: { type: 'string' }, maxItems: 5 }
+                },
+                required: ['name','objective'],
+                additionalProperties: false
+              }
+            },
+            agentId: { type: 'string', description: 'ID unik sesi/agent untuk claim ownership' },
+            taskName: { type: 'string', description: 'Task target; claim boleh kosong untuk mengambil task ready pertama' },
+            leaseSeconds: { type: 'integer', minimum: 60, maximum: 3600, description: 'Lease claim/heartbeat, default 900 detik' },
+            summary: { type: 'string', description: 'Ringkasan non-secret hasil task; wajib untuk submit' },
+            commit: { type: 'string', description: 'Optional expected commit/prefix; submit memverifikasi terhadap HEAD aktual' },
+            evidence: { type: 'array', maxItems: 20, items: { type: 'string' }, description: 'Bukti verifikasi non-secret' },
+            note: { type: 'string', description: 'Catatan non-secret saat release' },
+            whitelist: { type: 'array', items: { type: 'string' } },
+            blacklist: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['connectionId','action'],
+          additionalProperties: false
+        }
+      },
+      {
         name: 'ssh_disconnect',
         description: 'Tutup koneksi SSH',
         inputSchema: {
@@ -1652,6 +1918,19 @@ function createServer(sshDefaultConfig) {
         };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Workspace Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_agent_board') {
+      try {
+        if (args.action !== 'list' && !args.boardId) throw new Error('boardId wajib untuk action=' + args.action);
+        const result = await sshAgentBoardWorkflow(args.connectionId, args.action, args);
+        return {
+          ...(result.ok === false ? { isError: true } : {}),
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Agent Board Error: ' + err.message }] };
       }
     }
 
@@ -1942,7 +2221,7 @@ document.getElementById('upload').onclick=async()=>{
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'browser_smoke', 'ssh_workspace', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
