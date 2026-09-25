@@ -16,6 +16,10 @@ import {
   assertCheckpointId,
   buildRepoSnapshotCommand,
   buildRepoVerifyCommand,
+  buildRepoWorktreeCommand,
+  buildRepoReviewCommand,
+  buildRepoCommitCommand,
+  buildRepoPushCommand,
   normalizeCheckpoint,
   parseTaggedOutput,
   shellQuote as workflowShellQuote,
@@ -39,7 +43,7 @@ try {
   });
 } catch {}
 
-const MCP_VERSION = '3.5.0';
+const MCP_VERSION = '3.6.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
@@ -624,6 +628,103 @@ async function sshRepoVerifyWorkflow(connectionId, repoPath, runScripts, whiteli
   };
 }
 
+async function sshRepoWorktreeWorkflow(connectionId, repoPath, action, args, whitelist, blacklist) {
+  const command = buildRepoWorktreeCommand(repoPath, action, {
+    worktreePath: args.worktreePath,
+    branch: args.branch,
+    baseRef: args.baseRef,
+    fetch: args.fetch
+  });
+  const output = await workflowExec(connectionId, command, whitelist, blacklist);
+  const parsed = parseTaggedOutput(output);
+  return {
+    ok: true,
+    action,
+    repoPath,
+    ...(parsed.worktree ? { worktreePath: parsed.worktree } : {}),
+    ...(parsed.removed ? { removed: parsed.removed } : {}),
+    ...(parsed.branch ? { branch: parsed.branch } : {}),
+    ...(parsed.commit ? { commit: parsed.commit } : {}),
+    worktrees: truncateText(parsed.worktrees || output, 12000)
+  };
+}
+
+async function sshRepoReviewWorkflow(connectionId, repoPath, baseRef, whitelist, blacklist) {
+  const output = await workflowExec(connectionId, buildRepoReviewCommand(repoPath, baseRef || 'HEAD'), whitelist, blacklist);
+  const parsed = parseTaggedOutput(output);
+  return {
+    repoPath,
+    branch: parsed.branch || null,
+    baseRef: parsed.base || baseRef || 'HEAD',
+    status: parsed.status || '',
+    diffCheck: parsed.diff_check || null,
+    diffStat: parsed.diff_stat || '',
+    changedFiles: parsed.changed_files || '',
+    untracked: parsed.untracked || '',
+    sensitiveFiles: parsed.sensitive_files || '',
+    patch: truncateText(parsed.patch || '', 26000)
+  };
+}
+
+async function sshRepoCommitPushWorkflow(connectionId, args) {
+  const verification = await sshRepoVerifyWorkflow(
+    connectionId,
+    args.repoPath,
+    args.runScripts || [],
+    args.whitelist,
+    args.blacklist
+  );
+  if (!verification.ok) {
+    return {
+      ok: false,
+      stage: 'verify',
+      committed: false,
+      pushed: false,
+      verification
+    };
+  }
+
+  const commitOutput = await workflowExec(
+    connectionId,
+    buildRepoCommitCommand(args.repoPath, args.message, args.paths, !!args.allowProtectedBranch),
+    args.whitelist,
+    args.blacklist
+  );
+  const parsed = parseTaggedOutput(commitOutput);
+  const result = {
+    ok: true,
+    stage: 'commit',
+    committed: true,
+    pushed: false,
+    repoPath: args.repoPath,
+    branch: parsed.branch || null,
+    commit: parsed.commit || null,
+    status: parsed.status || '',
+    verification
+  };
+
+  if (!args.push) return result;
+
+  try {
+    const pushOutput = await workflowExec(
+      connectionId,
+      buildRepoPushCommand(args.repoPath, parsed.branch, args.remote || 'origin'),
+      args.whitelist,
+      args.blacklist
+    );
+    const pushParsed = parseTaggedOutput(pushOutput);
+    return { ...result, stage: 'push', pushed: true, pushedTo: pushParsed.pushed || null };
+  } catch (err) {
+    return {
+      ...result,
+      ok: false,
+      stage: 'push',
+      pushed: false,
+      pushError: truncateText(err.message, 4000)
+    };
+  }
+}
+
 // Auth & rate limiting
 const authCodes = new Map();
 const accessTokens = new Map();
@@ -935,6 +1036,60 @@ function createServer(sshDefaultConfig) {
         }
       },
       {
+        name: 'ssh_repo_worktree',
+        description: 'Kelola isolated Git worktree untuk development aman. create selalu membuat branch lokal baru; remove hanya menghapus worktree yang bersih dan tidak menghapus branch; list menampilkan worktree aktual.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            repoPath: { type: 'string', description: 'Path absolut repository Git utama' },
+            action: { type: 'string', enum: ['list','create','remove'] },
+            worktreePath: { type: 'string', description: 'Path absolut worktree; wajib untuk create/remove' },
+            branch: { type: 'string', description: 'Branch baru; wajib untuk create' },
+            baseRef: { type: 'string', description: 'Base ref create, default HEAD' },
+            fetch: { type: 'boolean', description: 'Fetch --all --prune sebelum create; default false' },
+            whitelist: { type: 'array', items: { type: 'string' } },
+            blacklist: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['connectionId','repoPath','action']
+        }
+      },
+      {
+        name: 'ssh_repo_review',
+        description: 'Review perubahan Git terstruktur terhadap baseRef tanpa membaca .env/credential. Menampilkan status, diff check/stat, file berubah, untracked, dan patch terbatas; patch dihilangkan bila path sensitif terdeteksi.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            repoPath: { type: 'string', description: 'Path absolut repository/worktree Git' },
+            baseRef: { type: 'string', description: 'Git ref pembanding, default HEAD' },
+            whitelist: { type: 'array', items: { type: 'string' } },
+            blacklist: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['connectionId','repoPath']
+        }
+      },
+      {
+        name: 'ssh_repo_commit_push',
+        description: 'Verifikasi lalu commit path eksplisit secara aman; menolak pre-existing staged changes, path sensitif, secret-like diff, detached HEAD, dan protected branch secara default. Push hanya jika push=true; kegagalan push dilaporkan tanpa menyembunyikan commit lokal yang sudah berhasil.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            connectionId: { type: 'string', description: 'ID koneksi SSH' },
+            repoPath: { type: 'string', description: 'Path absolut repository/worktree Git' },
+            message: { type: 'string', description: 'Commit message satu baris' },
+            paths: { type: 'array', items: { type: 'string' }, description: 'Path relatif repo yang akan di-stage secara eksplisit' },
+            runScripts: { type: 'array', items: { type: 'string', enum: ['typecheck','lint','test','build'] }, description: 'Verification scripts sebelum staging/commit' },
+            push: { type: 'boolean', description: 'Jika true, push commit setelah commit sukses; default false' },
+            remote: { type: 'string', description: 'Remote push, default origin' },
+            allowProtectedBranch: { type: 'boolean', description: 'Harus true secara eksplisit untuk commit ke main/master/production/prod' },
+            whitelist: { type: 'array', items: { type: 'string' } },
+            blacklist: { type: 'array', items: { type: 'string' } }
+          },
+          required: ['connectionId','repoPath','message','paths']
+        }
+      },
+      {
         name: 'ssh_disconnect',
         description: 'Tutup koneksi SSH',
         inputSchema: {
@@ -1150,6 +1305,40 @@ function createServer(sshDefaultConfig) {
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Repo Verify Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_repo_worktree') {
+      try {
+        if ((args.action === 'create' || args.action === 'remove') && !args.worktreePath) {
+          throw new Error('worktreePath wajib untuk action=' + args.action);
+        }
+        if (args.action === 'create' && !args.branch) throw new Error('branch wajib untuk action=create');
+        const result = await sshRepoWorktreeWorkflow(args.connectionId, args.repoPath, args.action, args, args.whitelist, args.blacklist);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Repo Worktree Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_repo_review') {
+      try {
+        const result = await sshRepoReviewWorkflow(args.connectionId, args.repoPath, args.baseRef, args.whitelist, args.blacklist);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Repo Review Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'ssh_repo_commit_push') {
+      try {
+        const result = await sshRepoCommitPushWorkflow(args.connectionId, args);
+        return {
+          ...(result.ok ? {} : { isError: true }),
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Repo Commit/Push Error: ' + err.message }] };
       }
     }
 
@@ -1440,7 +1629,7 @@ document.getElementById('upload').onclick=async()=>{
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 

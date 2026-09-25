@@ -128,3 +128,124 @@ export function truncateText(value, max = 16000) {
   const text = String(value ?? '');
   return text.length <= max ? text : `${text.slice(0, max)}\n...[output truncated ${text.length - max} chars]`;
 }
+
+
+const PROTECTED_BRANCHES = new Set(['main', 'master', 'production', 'prod']);
+const SENSITIVE_PATH_PATTERNS = [
+  /(^|\/)\.env(?:\.|$)/i,
+  /(^|\/)\.npmrc$/i,
+  /(^|\/)\.pypirc$/i,
+  /(^|\/)id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i,
+  /\.(?:pem|key|p12|pfx)$/i,
+  /(^|\/)credentials(?:\.[^\/]+)?\.json$/i,
+  /(^|\/)service[-_]?account(?:\.[^\/]+)?\.json$/i
+];
+
+export function assertSafeGitRef(value, field = 'ref') {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 200) {
+    throw new Error(`${field} harus string 1-200 karakter`);
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(value) ||
+      value.includes('..') || value.includes('@{') || value.includes('//') ||
+      value.endsWith('/') || value.endsWith('.') || value.startsWith('-')) {
+    throw new Error(`${field} bukan Git ref yang aman`);
+  }
+  return value;
+}
+
+export function assertRepoRelativePath(value, field = 'path') {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 500 ||
+      value.startsWith('/') || value.startsWith('-') || value.startsWith(':') || /[\r\n]/.test(value) || value.includes('\0')) {
+    throw new Error(`${field} harus path relatif repo yang aman`);
+  }
+  const parts = value.split('/');
+  if (parts.some(part => part === '' || part === '.' || part === '..')) {
+    throw new Error(`${field} tidak boleh mengandung traversal/path segment kosong`);
+  }
+  return value;
+}
+
+export function isSensitiveRepoPath(value) {
+  const normalized = String(value).replace(/\\/g, '/');
+  return SENSITIVE_PATH_PATTERNS.some(re => re.test(normalized));
+}
+
+export function normalizeCommitPaths(paths) {
+  if (!Array.isArray(paths) || paths.length < 1 || paths.length > 100) {
+    throw new Error('paths harus array 1-100 path relatif repo');
+  }
+  const unique = [...new Set(paths.map((value, index) => assertRepoRelativePath(value, `paths[${index}]`)))];
+  const sensitive = unique.filter(isSensitiveRepoPath);
+  if (sensitive.length) {
+    throw new Error(`path sensitif tidak boleh di-stage lewat tool: ${sensitive.join(', ')}`);
+  }
+  return unique;
+}
+
+export function assertCommitMessage(value) {
+  if (typeof value !== 'string' || value.trim().length < 3 || value.length > 200 || /[\r\n]/.test(value)) {
+    throw new Error('message commit harus satu baris, 3-200 karakter');
+  }
+  return value.trim();
+}
+
+export function assertSafeRemoteName(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(value)) {
+    throw new Error('remote Git tidak valid');
+  }
+  return value;
+}
+
+export function buildRepoWorktreeCommand(repoPath, action, options = {}) {
+  assertAbsolutePath(repoPath, 'repoPath');
+  if (!['list', 'create', 'remove'].includes(action)) throw new Error('action worktree tidak valid');
+  const repoQ = shellQuote(repoPath);
+
+  if (action === 'list') {
+    return `set -e\ncd ${repoQ}\ngit rev-parse --show-toplevel >/dev/null 2>&1 || { echo '__ERROR__ not-a-git-repo'; exit 2; }\nprintf '__WORKTREES__\\n'; git worktree list --porcelain`;
+  }
+
+  assertAbsolutePath(options.worktreePath, 'worktreePath');
+  const wtQ = shellQuote(options.worktreePath);
+
+  if (action === 'remove') {
+    return `set -e\ncd ${repoQ}\ngit rev-parse --show-toplevel >/dev/null 2>&1 || { echo '__ERROR__ not-a-git-repo'; exit 2; }\nwt=${wtQ}\ngit -C "$wt" rev-parse --show-toplevel >/dev/null 2>&1 || { echo 'worktree tidak ditemukan/invalid' >&2; exit 4; }\nif [ -n "$(git -C "$wt" status --porcelain)" ]; then echo 'worktree masih memiliki perubahan; removal ditolak' >&2; exit 5; fi\ngit worktree remove -- "$wt"\nprintf '__REMOVED__\\n%s\\n' "$wt"\nprintf '__WORKTREES__\\n'; git worktree list --porcelain`;
+  }
+
+  const branch = assertSafeGitRef(options.branch, 'branch');
+  const baseRef = assertSafeGitRef(options.baseRef || 'HEAD', 'baseRef');
+  const branchQ = shellQuote(branch);
+  const baseQ = shellQuote(baseRef);
+  const fetch = !!options.fetch;
+  return `set -e\ncd ${repoQ}\ngit rev-parse --show-toplevel >/dev/null 2>&1 || { echo '__ERROR__ not-a-git-repo'; exit 2; }\n${fetch ? 'git fetch --all --prune\n' : ''}wt=${wtQ}\nbranch=${branchQ}\nbase=${baseQ}\n[ ! -e "$wt" ] || { echo 'worktreePath sudah ada' >&2; exit 6; }\nif git show-ref --verify --quiet "refs/heads/$branch"; then echo 'branch lokal sudah ada; create menolak reuse implisit' >&2; exit 7; fi\ngit rev-parse --verify "$base^{commit}" >/dev/null 2>&1 || { echo 'baseRef tidak ditemukan' >&2; exit 8; }\nmkdir -p -- "$(dirname "$wt")"\ngit worktree add -b "$branch" "$wt" "$base"\nprintf '__WORKTREE__\\n%s\\n' "$wt"\nprintf '__BRANCH__\\n%s\\n' "$branch"\nprintf '__COMMIT__\\n'; git -C "$wt" rev-parse HEAD`;
+}
+
+export function buildRepoReviewCommand(repoPath, baseRef = 'HEAD') {
+  assertAbsolutePath(repoPath, 'repoPath');
+  const ref = assertSafeGitRef(baseRef, 'baseRef');
+  const repoQ = shellQuote(repoPath);
+  const refQ = shellQuote(ref);
+  const sensitivePathRegex = '(^|/)(\\.env($|\\.)|\\.npmrc$|\\.pypirc$|id_(rsa|dsa|ecdsa|ed25519)(\\.pub)?$|credentials([^/]*)?\\.json$|service[-_]?account([^/]*)?\\.json$)|\\.(pem|key|p12|pfx)$';
+  return `set -e\ncd ${repoQ}\ngit rev-parse --show-toplevel >/dev/null 2>&1 || { echo '__ERROR__ not-a-git-repo'; exit 2; }\nbase=${refQ}\ngit rev-parse --verify "$base^{commit}" >/dev/null 2>&1 || { echo 'baseRef tidak ditemukan' >&2; exit 8; }\nprintf '__BRANCH__\\n'; git branch --show-current\nprintf '__BASE__\\n%s\\n' "$base"\nprintf '__STATUS__\\n'; git status --short --branch\nprintf '__DIFF_CHECK__\\n'; if git diff --check "$base" >/dev/null 2>&1; then echo PASS; else echo FAIL; fi\nprintf '__DIFF_STAT__\\n'; git diff --stat "$base"\nprintf '__CHANGED_FILES__\\n'; git diff --name-status "$base"\nprintf '__UNTRACKED__\\n'; git ls-files --others --exclude-standard\nchanged="$( { git diff --name-only "$base"; git ls-files --others --exclude-standard; } | sort -u )"\nprintf '__SENSITIVE_FILES__\\n'; printf '%s\\n' "$changed" | grep -Ei '${sensitivePathRegex}' || true\nif printf '%s\\n' "$changed" | grep -Eqi '${sensitivePathRegex}'; then\n  printf '__PATCH__\\nOMITTED: perubahan menyentuh path sensitif; review konten harus dilakukan melalui jalur khusus yang tidak mencetak credential.\\n'\nelse\n  printf '__PATCH__\\n'; git diff --no-ext-diff --unified=3 "$base" | head -c 24000 || true\nfi`;
+}
+
+export function buildRepoCommitCommand(repoPath, message, paths, allowProtectedBranch = false) {
+  assertAbsolutePath(repoPath, 'repoPath');
+  const msg = assertCommitMessage(message);
+  const normalizedPaths = normalizeCommitPaths(paths);
+  const repoQ = shellQuote(repoPath);
+  const msgQ = shellQuote(msg);
+  const pathArgs = normalizedPaths.map(shellQuote).join(' ');
+  const secretPattern = '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|(^|[^A-Za-z])(api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|private[_-]?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}|(^|[^A-Za-z])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z])gh[pousr]_[A-Za-z0-9]{20,}|(^|[^A-Za-z])AKIA[0-9A-Z]{16}';
+  const secretQ = shellQuote(secretPattern);
+  const sensitivePathRegex = '(^|/)(\\.env($|\\.)|\\.npmrc$|\\.pypirc$|id_(rsa|dsa|ecdsa|ed25519)(\\.pub)?$|credentials([^/]*)?\\.json$|service[-_]?account([^/]*)?\\.json$)|\\.(pem|key|p12|pfx)$';
+  const protectedCase = allowProtectedBranch ? '' : `case "$branch" in ${[...PROTECTED_BRANCHES].join('|')}) echo 'protected branch: commit ditolak tanpa allowProtectedBranch=true' >&2; exit 10;; esac\n`;
+  return `set -e\ncd ${repoQ}\ngit rev-parse --show-toplevel >/dev/null 2>&1 || { echo '__ERROR__ not-a-git-repo'; exit 2; }\nbranch="$(git branch --show-current)"\n[ -n "$branch" ] || { echo 'detached HEAD: commit ditolak' >&2; exit 9; }\n${protectedCase}if ! git diff --cached --quiet; then echo 'sudah ada staged changes sebelum tool dijalankan; commit ditolak agar tidak mencampur perubahan' >&2; exit 11; fi\ngit --literal-pathspecs add -- ${pathArgs}\ncleanup_stage() { git --literal-pathspecs restore --staged -- ${pathArgs} >/dev/null 2>&1 || git --literal-pathspecs reset -q HEAD -- ${pathArgs} >/dev/null 2>&1 || true; }\nif git diff --cached --quiet; then cleanup_stage; echo 'tidak ada perubahan pada paths yang dipilih' >&2; exit 12; fi\nif git diff --cached --name-only | grep -Eqi '${sensitivePathRegex}'; then cleanup_stage; echo 'staging menghasilkan path sensitif; commit ditolak' >&2; exit 13; fi\ngit diff --cached --check || { cleanup_stage; echo 'git diff --cached --check gagal' >&2; exit 14; }\nsecret_pattern=${secretQ}\nif git diff --cached --no-ext-diff --unified=0 | grep '^+' | grep -Ev '^\\+\\+\\+' | grep -Eqi -- "$secret_pattern"; then cleanup_stage; echo 'secret-like content terdeteksi pada staged diff; commit ditolak' >&2; exit 15; fi\ngit commit -m ${msgQ}\nprintf '__BRANCH__\\n%s\\n' "$branch"\nprintf '__COMMIT__\\n'; git rev-parse HEAD\nprintf '__STATUS__\\n'; git status --short --branch`;
+}
+
+export function buildRepoPushCommand(repoPath, branch, remote = 'origin') {
+  assertAbsolutePath(repoPath, 'repoPath');
+  const safeBranch = assertSafeGitRef(branch, 'branch');
+  const safeRemote = assertSafeRemoteName(remote);
+  return `set -e\ncd ${shellQuote(repoPath)}\ngit rev-parse --show-toplevel >/dev/null 2>&1 || { echo '__ERROR__ not-a-git-repo'; exit 2; }\ngit push -- ${shellQuote(safeRemote)} HEAD:${shellQuote(`refs/heads/${safeBranch}`)}\nprintf '__PUSHED__\\n%s/%s\\n' ${shellQuote(safeRemote)} ${shellQuote(safeBranch)}`;
+}

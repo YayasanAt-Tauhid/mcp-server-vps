@@ -10,6 +10,13 @@ import {
   assertCheckpointId,
   buildRepoSnapshotCommand,
   buildRepoVerifyCommand,
+  buildRepoWorktreeCommand,
+  buildRepoReviewCommand,
+  buildRepoCommitCommand,
+  buildRepoPushCommand,
+  assertSafeGitRef,
+  normalizeCommitPaths,
+  isSensitiveRepoPath,
   containsSecretLike,
   normalizeCheckpoint,
   normalizeVerifyScripts,
@@ -149,4 +156,104 @@ test('snapshot and verify support linked Git worktrees', () => {
     rmSync(linked, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Git ref and commit path guardrails reject unsafe or sensitive values', () => {
+  assert.equal(assertSafeGitRef('feat/coding-agent'), 'feat/coding-agent');
+  assert.throws(() => assertSafeGitRef('../main'), /aman/);
+  assert.throws(() => assertSafeGitRef('main~1'), /aman/);
+  assert.equal(isSensitiveRepoPath('.env.production'), true);
+  assert.equal(isSensitiveRepoPath('src/config.js'), false);
+  assert.deepEqual(normalizeCommitPaths(['src/a.js', 'src/a.js', 'README.md']), ['src/a.js', 'README.md']);
+  assert.throws(() => normalizeCommitPaths(['../escape']), /path/);
+  assert.throws(() => normalizeCommitPaths([':(glob)**']), /path/);
+  assert.throws(() => normalizeCommitPaths(['.env']), /sensitif/);
+});
+
+test('worktree command creates isolated branch and removes only a clean worktree', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-worktree-lifecycle-'));
+  const linked = dir + '-linked';
+  try {
+    git(dir, 'init', '-q');
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'test');
+    writeFileSync(join(dir, 'README.md'), 'fixture\n');
+    git(dir, 'add', 'README.md');
+    git(dir, 'commit', '-qm', 'fixture');
+
+    let r = spawnSync('bash', ['-c', buildRepoWorktreeCommand(dir, 'create', {
+      worktreePath: linked,
+      branch: 'feat/toolkit-fixture',
+      baseRef: 'HEAD'
+    })], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+    assert.match(r.stdout, /__BRANCH__\nfeat\/toolkit-fixture/);
+
+    writeFileSync(join(linked, 'dirty.txt'), 'dirty\n');
+    r = spawnSync('bash', ['-c', buildRepoWorktreeCommand(dir, 'remove', { worktreePath: linked })], { encoding: 'utf8' });
+    assert.equal(r.status, 5);
+    assert.match(r.stderr, /masih memiliki perubahan/);
+    rmSync(join(linked, 'dirty.txt'));
+
+    r = spawnSync('bash', ['-c', buildRepoWorktreeCommand(dir, 'remove', { worktreePath: linked })], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+    assert.match(r.stdout, /__REMOVED__/);
+  } finally {
+    rmSync(linked, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('review command omits patch when a sensitive path is present without reading its content', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-review-sensitive-'));
+  try {
+    git(dir, 'init', '-q');
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'test');
+    writeFileSync(join(dir, 'README.md'), 'fixture\n');
+    git(dir, 'add', 'README.md');
+    git(dir, 'commit', '-qm', 'fixture');
+    writeFileSync(join(dir, 'README.md'), 'changed\n');
+    writeFileSync(join(dir, '.env'), 'fixture-private-value\n');
+
+    const r = spawnSync('bash', ['-c', buildRepoReviewCommand(dir, 'HEAD')], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+    assert.match(r.stdout, /__SENSITIVE_FILES__\n\.env/);
+    assert.match(r.stdout, /__PATCH__\nOMITTED:/);
+    assert.doesNotMatch(r.stdout, /fixture-private-value/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('commit command blocks protected branch by default and commits explicit paths when allowed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-commit-guard-'));
+  try {
+    git(dir, 'init', '-q');
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'test');
+    writeFileSync(join(dir, 'README.md'), 'fixture\n');
+    git(dir, 'add', 'README.md');
+    git(dir, 'commit', '-qm', 'fixture');
+    git(dir, 'branch', '-M', 'main');
+    writeFileSync(join(dir, 'README.md'), 'changed\n');
+
+    let r = spawnSync('bash', ['-c', buildRepoCommitCommand(dir, 'test: protected guard', ['README.md'], false)], { encoding: 'utf8' });
+    assert.equal(r.status, 10);
+    assert.match(r.stderr, /protected branch/);
+
+    r = spawnSync('bash', ['-c', buildRepoCommitCommand(dir, 'test: explicit commit', ['README.md'], true)], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+    assert.match(r.stdout, /__BRANCH__\nmain/);
+    assert.match(r.stdout, /__COMMIT__\n[0-9a-f]{40}/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('commit command uses literal pathspecs and push targets the validated branch ref', () => {
+  const commitCommand = buildRepoCommitCommand('/srv/repo', 'test: literal path', ['src/file.js'], true);
+  assert.match(commitCommand, /git --literal-pathspecs add/);
+  const command = buildRepoPushCommand('/srv/repo', 'feat/coding-agent', 'origin');
+  assert.match(command, /git push -- 'origin' HEAD:'refs\/heads\/feat\/coding-agent'/);
 });
