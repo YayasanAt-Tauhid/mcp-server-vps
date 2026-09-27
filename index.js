@@ -28,8 +28,8 @@ try {
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-v1.html';
-const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/browser/vnc.html?path=browser/websockify&autoconnect=1';
+const BROWSER_UI_URI = 'ui://attauhid/browser-v2.html';
+const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 
 // SSH connection pool
 const sshConnections = new Map();
@@ -345,7 +345,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.3.0' },
+    { name: 'vps2-mcp', version: '3.3.1' },
     { capabilities: { tools: {}, resources: {} } }
   );
 
@@ -1130,7 +1130,7 @@ if (cliArgs.includes('--http')) {
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.3.0', mode: 'http', auth: 'oauth2-password-protected',
+    status: 'ok', version: '3.3.1', mode: 'http', auth: 'oauth2-password-protected',
     tools: ['browser_view','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
