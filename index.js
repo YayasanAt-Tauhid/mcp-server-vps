@@ -30,8 +30,16 @@ const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
 const BROWSER_UI_URI = 'ui://attauhid/browser-v2.html';
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
+function browserViewLink() {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const expires = Date.now() + 120000;
+  const sig = crypto.createHmac('sha256', APPROVE_PASSWORD).update('browser-view:' + nonce + ':' + expires).digest('hex');
+  return BROWSER_VIEW_URL + '?nonce=' + nonce + '&expires=' + expires + '&sig=' + sig;
+}
+
 
 // SSH connection pool
+const browserViews = new Map();
 const sshConnections = new Map();
 const sshConfigs = new Map(); // simpan config untuk SFTP reuse
 const sshShells = new Map(); // connectionId -> { stream, buffer } (shell persisten)
@@ -673,11 +681,14 @@ function createServer(sshDefaultConfig) {
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    if (request.params.uri !== BROWSER_UI_URI) throw new Error('Resource tidak ditemukan');
+    const requestedUri = request.params.uri;
+    const viewId = requestedUri.startsWith(BROWSER_UI_URI + '?view=') ? requestedUri.slice((BROWSER_UI_URI + '?view=').length) : null;
+    const viewLink = viewId ? browserViews.get(viewId) : null;
+    if (requestedUri !== BROWSER_UI_URI && !viewLink) throw new Error('Resource tidak ditemukan');
     return { contents: [{
-      uri: BROWSER_UI_URI,
+      uri: requestedUri,
       mimeType: 'text/html;profile=mcp-app',
-      text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8'),
+      text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8').replaceAll(BROWSER_VIEW_URL, viewLink || BROWSER_VIEW_URL),
       _meta: { ui: {
         prefersBorder: false,
         csp: { frameDomains: ['https://browser-vps.hijrah-attauhid.or.id'] }
@@ -689,7 +700,12 @@ function createServer(sshDefaultConfig) {
     const { name, arguments: args } = request.params;
 
     if (name === 'browser_view') {
-      return { content: [{ type: 'text', text: 'Panel browser bersama siap. Jika panel tidak muncul, buka ' + BROWSER_VIEW_URL }], _meta: { ui: { resourceUri: BROWSER_UI_URI }, 'openai/outputTemplate': BROWSER_UI_URI } };
+      const viewId = crypto.randomBytes(16).toString('hex');
+      const link = browserViewLink();
+      browserViews.set(viewId, link);
+      setTimeout(() => browserViews.delete(viewId), 180000).unref();
+      const uri = BROWSER_UI_URI + '?view=' + viewId;
+      return { content: [{ type: 'text', text: 'Panel browser bersama siap. Buka panel yang ditampilkan untuk mengakses browser.' }], _meta: { ui: { resourceUri: uri }, 'openai/outputTemplate': uri } };
     }
 
     if (name === 'browser_open') {
