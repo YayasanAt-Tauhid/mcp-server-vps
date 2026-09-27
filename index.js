@@ -10,6 +10,10 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { Client } from 'ssh2';
 import SftpClient from 'ssh2-sftp-client';
+import {
+  browserOpen, browserSnapshot, browserClick, browserType, browserSelect,
+  browserWait, browserScreenshot, browserTabs, browserBack, browserReload
+} from './browser-tools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -339,12 +343,136 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.1.0' },
+    { name: 'vps2-mcp', version: '3.2.0' },
     { capabilities: { tools: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      {
+        name: 'browser_open',
+        description: 'Buka URL http/https pada Chromium bersama di VPS At-Tauhid. Browser memakai profil persisten yang juga dapat dilihat pengguna melalui noVNC.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'URL http/https yang akan dibuka' },
+            tabIndex: { type: 'number', description: 'Tab tujuan; default tab aktif' },
+            timeoutMs: { type: 'number', description: 'Timeout navigasi, default 15000 ms' },
+            settleMs: { type: 'number', description: 'Jeda setelah navigasi sebelum hasil dikembalikan' }
+          },
+          required: ['url']
+        }
+      },
+      {
+        name: 'browser_snapshot',
+        description: 'Baca kondisi halaman dan elemen interaktif dari browser bersama. Tidak mengembalikan nilai field input/password. Setiap elemen mendapat ref e0, e1, dst untuk click/type/select.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            tabIndex: { type: 'number', description: 'Tab yang dibaca; default tab aktif' },
+            limit: { type: 'number', description: 'Batas elemen interaktif, default 120 maksimum 250' }
+          }
+        }
+      },
+      {
+        name: 'browser_click',
+        description: 'Klik elemen browser menggunakan ref dari browser_snapshot, CSS selector, atau teks.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ref: { type: 'string', description: 'Ref elemen, mis. e3' },
+            selector: { type: 'string', description: 'CSS selector alternatif' },
+            text: { type: 'string', description: 'Teks elemen alternatif' },
+            exact: { type: 'boolean', description: 'Pencocokan text exact, default true' },
+            tabIndex: { type: 'number' },
+            timeoutMs: { type: 'number' },
+            settleMs: { type: 'number' }
+          }
+        }
+      },
+      {
+        name: 'browser_type',
+        description: 'Isi field non-sensitif pada browser bersama. Tool menolak field password, OTP, token, PIN, 2FA/MFA, atau field yang terdeteksi sensitif; isi data sensitif langsung melalui noVNC.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ref: { type: 'string' },
+            selector: { type: 'string' },
+            text: { type: 'string', description: 'Teks elemen target, bukan nilai yang akan diketik' },
+            exact: { type: 'boolean' },
+            value: { type: 'string', description: 'Nilai non-sensitif yang akan diisi' },
+            append: { type: 'boolean', description: 'Jika true, ketik di posisi saat ini; default false menggunakan fill' },
+            delayMs: { type: 'number' },
+            tabIndex: { type: 'number' }
+          },
+          required: ['value']
+        }
+      },
+      {
+        name: 'browser_select',
+        description: 'Pilih opsi pada elemen select menggunakan ref/selector/text.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ref: { type: 'string' },
+            selector: { type: 'string' },
+            text: { type: 'string' },
+            value: { type: 'string' },
+            values: { type: 'array', items: { type: 'string' } },
+            tabIndex: { type: 'number' }
+          }
+        }
+      },
+      {
+        name: 'browser_wait',
+        description: 'Tunggu waktu tertentu atau sampai selector/text/URL tertentu muncul.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: { type: 'string' },
+            text: { type: 'string' },
+            exact: { type: 'boolean' },
+            urlContains: { type: 'string' },
+            state: { type: 'string', enum: ['attached','detached','visible','hidden'] },
+            timeoutMs: { type: 'number', description: 'Default 10000 ms, maksimum 60000 ms' },
+            tabIndex: { type: 'number' }
+          }
+        }
+      },
+      {
+        name: 'browser_screenshot',
+        description: 'Ambil screenshot PNG dari tab browser aktif dan kembalikan sebagai image content.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            fullPage: { type: 'boolean', description: 'Screenshot seluruh halaman; default false' },
+            tabIndex: { type: 'number' }
+          }
+        }
+      },
+      {
+        name: 'browser_tabs',
+        description: 'Kelola tab browser: list, new, select, atau close.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['list','new','select','close'], description: 'Default list' },
+            index: { type: 'number', description: 'Index untuk select/close' },
+            url: { type: 'string', description: 'URL opsional saat action=new' },
+            timeoutMs: { type: 'number' }
+          }
+        }
+      },
+      {
+        name: 'browser_back',
+        description: 'Navigasi kembali pada tab browser aktif.',
+        inputSchema: { type: 'object', properties: { tabIndex: { type: 'number' }, timeoutMs: { type: 'number' } } }
+      },
+      {
+        name: 'browser_reload',
+        description: 'Reload tab browser aktif.',
+        inputSchema: { type: 'object', properties: { tabIndex: { type: 'number' }, timeoutMs: { type: 'number' } } }
+      },
       {
         name: 'ssh_connect',
         description: sshDefaultConfig
@@ -534,6 +662,99 @@ function createServer(sshDefaultConfig) {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    if (name === 'browser_open') {
+      try {
+        const result = await browserOpen(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Open Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_snapshot') {
+      try {
+        const result = await browserSnapshot(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Snapshot Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_click') {
+      try {
+        const result = await browserClick(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Click Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_type') {
+      try {
+        const result = await browserType(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Type Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_select') {
+      try {
+        const result = await browserSelect(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Select Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_wait') {
+      try {
+        const result = await browserWait(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Wait Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_screenshot') {
+      try {
+        const result = await browserScreenshot(args || {});
+        return { content: [
+          { type: 'text', text: JSON.stringify(result.info, null, 2) },
+          { type: 'image', data: result.image, mimeType: 'image/png' }
+        ] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Screenshot Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_tabs') {
+      try {
+        const result = await browserTabs(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Tabs Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_back') {
+      try {
+        const result = await browserBack(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Back Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_reload') {
+      try {
+        const result = await browserReload(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Reload Error: ' + err.message }] };
+      }
+    }
 
     if (name === 'ssh_connect') {
       try {
@@ -741,7 +962,7 @@ if (cliArgs.includes('--http')) {
 </head><body>
 <h2>🔐 MCP VPS2 - SSH Server</h2>
 <p>Masukkan detail koneksi SSH dan password untuk mengizinkan akses.</p>
-<div class="info"><b>Akses yang diberikan:</b><br>• Koneksi SSH ke server remote<br>• Eksekusi perintah via SSH<br>• Upload & Download file via SSH<br>• Browse file via SSH</div>
+<div class="info"><b>Akses yang diberikan:</b><br>• Koneksi SSH ke server remote<br>• Eksekusi perintah via SSH<br>• Upload & Download file via SSH<br>• Browse file via SSH<br>• Kontrol browser bersama Chromium (password/OTP/token tidak diisi oleh AI)</div>
 <form method="POST" action="/oauth/approve">
 <input type="hidden" name="tempId" value="${tempId}">
 <fieldset>
@@ -880,13 +1101,13 @@ if (cliArgs.includes('--http')) {
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.1.0', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
+    status: 'ok', version: '3.2.0', mode: 'http', auth: 'oauth2-password-protected',
+    tools: ['browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
   app.listen(PORT, () => {
-    console.error(`MCP SSH Server v3.1.0: http://0.0.0.0:${PORT}`);
+    console.error(`MCP SSH Server v3.2.0: http://0.0.0.0:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
@@ -894,5 +1115,5 @@ if (cliArgs.includes('--http')) {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MCP SSH Server v3.1.0 siap! (stdio mode)');
+  console.error('MCP SSH Server v3.2.0 siap! (stdio mode)');
 }
