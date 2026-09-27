@@ -2,7 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -28,6 +28,8 @@ try {
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
+const BROWSER_UI_URI = 'ui://attauhid/browser-v1.html';
+const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/browser/vnc.html?path=browser/websockify&autoconnect=1';
 
 // SSH connection pool
 const sshConnections = new Map();
@@ -343,12 +345,18 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.2.0' },
-    { capabilities: { tools: {} } }
+    { name: 'vps2-mcp', version: '3.3.0' },
+    { capabilities: { tools: {}, resources: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      {
+        name: 'browser_view',
+        description: 'Tampilkan browser bersama VPS At-Tauhid sebagai panel interaktif di ChatGPT. Pengguna dapat memasukkan login langsung di panel.',
+        inputSchema: { type: 'object', properties: {} },
+        _meta: { ui: { resourceUri: BROWSER_UI_URI }, 'openai/outputTemplate': BROWSER_UI_URI }
+      },
       {
         name: 'browser_open',
         description: 'Buka URL http/https pada Chromium bersama di VPS At-Tauhid. Browser memakai profil persisten yang juga dapat dilihat pengguna melalui noVNC.',
@@ -660,8 +668,29 @@ function createServer(sshDefaultConfig) {
     ]
   }));
 
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    resources: [{ uri: BROWSER_UI_URI, name: 'Browser VPS At-Tauhid', mimeType: 'text/html;profile=mcp-app' }]
+  }));
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    if (request.params.uri !== BROWSER_UI_URI) throw new Error('Resource tidak ditemukan');
+    return { contents: [{
+      uri: BROWSER_UI_URI,
+      mimeType: 'text/html;profile=mcp-app',
+      text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8'),
+      _meta: { ui: {
+        prefersBorder: false,
+        csp: { frameDomains: ['https://browser-vps.hijrah-attauhid.or.id'] }
+      } }
+    }] };
+  });
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    if (name === 'browser_view') {
+      return { content: [{ type: 'text', text: 'Panel browser bersama siap. Jika panel tidak muncul, buka ' + BROWSER_VIEW_URL }], _meta: { ui: { resourceUri: BROWSER_UI_URI }, 'openai/outputTemplate': BROWSER_UI_URI } };
+    }
 
     if (name === 'browser_open') {
       try {
@@ -1101,8 +1130,8 @@ if (cliArgs.includes('--http')) {
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.2.0', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
+    status: 'ok', version: '3.3.0', mode: 'http', auth: 'oauth2-password-protected',
+    tools: ['browser_view','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
