@@ -1,7 +1,153 @@
 <!doctype html>
-<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Browser VPS At-Tauhid</title>
-<style>html,body{margin:0;height:100%;font:14px system-ui,sans-serif;background:#151a23;color:#fff}.bar{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;background:#202938}.bar a{color:#b9d4ff}iframe{display:block;width:100%;height:calc(100% - 44px);border:0}</style>
-</head><body><div class="bar"><strong>Browser VPS At-Tauhid</strong><a href="https://browser-vps.hijrah-attauhid.or.id/embed/login" target="_blank" rel="noopener noreferrer">Buka layar terpisah</a></div>
-<iframe title="Browser bersama VPS At-Tauhid" src="https://browser-vps.hijrah-attauhid.or.id/embed/login" allow="fullscreen"></iframe>
-</body></html>
+<style>
+html,body{margin:0;height:100%;font:14px system-ui,sans-serif;background:#151a23;color:#fff}
+body{overflow:hidden}
+.bar{height:44px;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 12px;background:#202938}
+.bar strong{white-space:nowrap}
+.bar a{color:#b9d4ff;display:none;white-space:nowrap}
+.status{opacity:.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center}
+.wrap{position:relative;height:calc(100% - 44px);min-height:360px}
+iframe{display:none;width:100%;height:100%;border:0;background:#111}
+.loading{position:absolute;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:#d8e2f0}
+</style>
+</head>
+<body>
+<div class="bar">
+  <strong>Browser VPS At-Tauhid</strong>
+  <span id="status" class="status">Menyiapkan sesi aman…</span>
+  <a id="external" target="_blank" rel="noopener noreferrer">Buka layar terpisah</a>
+</div>
+<div class="wrap">
+  <div id="loading" class="loading">Menghubungkan panel browser ke sesi MCP…</div>
+  <iframe id="browser" title="Browser bersama VPS At-Tauhid" allow="fullscreen"></iframe>
+</div>
+<script>
+(() => {
+  const ORIGIN = 'https://browser-vps.hijrah-attauhid.or.id';
+  const frame = document.getElementById('browser');
+  const loading = document.getElementById('loading');
+  const status = document.getElementById('status');
+  const external = document.getElementById('external');
+  let loaded = false;
+  let rpcId = 0;
+  const pending = new Map();
+
+  function safeUrl(value) {
+    if (typeof value !== 'string' || !value) return null;
+    try {
+      const u = new URL(value);
+      if (u.origin !== ORIGIN || u.pathname !== '/embed/login') return null;
+      if (!u.searchParams.get('nonce') || !u.searchParams.get('expires') || !u.searchParams.get('sig')) return null;
+      return u.href;
+    } catch {
+      return null;
+    }
+  }
+
+  function extractUrl(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return null;
+    const direct = safeUrl(obj.browserViewUrl) || safeUrl(obj._meta?.browserViewUrl);
+    if (direct) return direct;
+    for (const key of ['mcp_tool_result', 'call_tool_result', 'result', 'params', 'toolResponseMetadata']) {
+      const found = extractUrl(obj[key], depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function openView(value) {
+    const url = safeUrl(value);
+    if (!url || loaded) return false;
+    loaded = true;
+    external.href = url;
+    external.style.display = 'inline';
+    status.textContent = 'Terhubung';
+    loading.style.display = 'none';
+    frame.style.display = 'block';
+    frame.src = url;
+    return true;
+  }
+
+  function openFromChatGPTGlobals() {
+    try {
+      const oa = window.openai;
+      return openView(extractUrl(oa?.toolResponseMetadata))
+        || openView(extractUrl(oa?.toolOutput))
+        || openView(extractUrl(oa));
+    } catch {
+      return false;
+    }
+  }
+
+  function notify(method, params) {
+    window.parent.postMessage({ jsonrpc: '2.0', method, params }, '*');
+  }
+
+  function request(method, params) {
+    return new Promise((resolve, reject) => {
+      const id = ++rpcId;
+      pending.set(id, { resolve, reject });
+      window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== '2.0') return;
+
+    if (typeof message.id === 'number') {
+      const waiter = pending.get(message.id);
+      if (!waiter) return;
+      pending.delete(message.id);
+      if (message.error) waiter.reject(message.error);
+      else waiter.resolve(message.result);
+      return;
+    }
+
+    if (message.method === 'ui/notifications/tool-result') {
+      const url = extractUrl(message.params);
+      if (url) openView(url);
+    }
+  }, { passive: true });
+
+  async function initializeBridge() {
+    try {
+      await request('ui/initialize', {
+        appInfo: { name: 'attauhid-browser', version: '5.0.0' },
+        appCapabilities: {},
+        protocolVersion: '2026-01-26'
+      });
+      notify('ui/notifications/initialized', {});
+      status.textContent = 'Menunggu tiket browser…';
+      openFromChatGPTGlobals();
+    } catch (error) {
+      status.textContent = 'Bridge kompatibilitas';
+      openFromChatGPTGlobals();
+    }
+  }
+
+  openFromChatGPTGlobals();
+  initializeBridge();
+
+  const poll = setInterval(() => {
+    if (loaded) return clearInterval(poll);
+    openFromChatGPTGlobals();
+  }, 150);
+
+  setTimeout(() => {
+    if (!loaded) {
+      clearInterval(poll);
+      status.textContent = 'Tiket browser belum diterima';
+      loading.textContent = 'Panel sudah termuat, tetapi tiket sesi browser belum diterima. Jalankan browser_view lagi setelah konektor diperbarui.';
+    }
+  }, 15000);
+})();
+</script>
+</body>
+</html>

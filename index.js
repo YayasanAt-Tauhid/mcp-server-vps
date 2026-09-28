@@ -28,7 +28,7 @@ try {
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-v3.html';
+const BROWSER_UI_URI = 'ui://attauhid/browser-v5.html';
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 function browserViewLink() {
   const nonce = crypto.randomBytes(16).toString('hex');
@@ -352,7 +352,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.3.1' },
+    { name: 'vps2-mcp', version: '3.4.0' },
     { capabilities: { tools: {}, resources: {} } }
   );
 
@@ -362,7 +362,19 @@ function createServer(sshDefaultConfig) {
         name: 'browser_view',
         description: 'Tampilkan browser bersama VPS At-Tauhid sebagai panel interaktif di ChatGPT. Pengguna dapat memasukkan login langsung di panel.',
         inputSchema: { type: 'object', properties: {} },
-        _meta: { ui: { resourceUri: BROWSER_UI_URI }, 'openai/outputTemplate': BROWSER_UI_URI }
+        outputSchema: {
+          type: 'object',
+          properties: { ready: { type: 'boolean' } },
+          required: ['ready'],
+          additionalProperties: false
+        },
+        _meta: {
+          ui: { resourceUri: BROWSER_UI_URI, visibility: ['model', 'app'] },
+          'openai/outputTemplate': BROWSER_UI_URI,
+          'openai/widgetAccessible': true,
+          'openai/toolInvocation/invoking': 'Membuka browser VPS…',
+          'openai/toolInvocation/invoked': 'Browser VPS siap'
+        }
       },
       {
         name: 'browser_open',
@@ -681,15 +693,22 @@ function createServer(sshDefaultConfig) {
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     if (request.params.uri !== BROWSER_UI_URI) throw new Error('Resource tidak ditemukan');
-    const viewLink = browserViewLink();
     return { contents: [{
       uri: BROWSER_UI_URI,
       mimeType: 'text/html;profile=mcp-app',
-      text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8').replaceAll(BROWSER_VIEW_URL, viewLink),
-      _meta: { ui: {
-        prefersBorder: false,
-        csp: { frameDomains: ['https://browser-vps.hijrah-attauhid.or.id'] }
-      } }
+      text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8'),
+      _meta: {
+        ui: {
+          prefersBorder: false,
+          csp: { frameDomains: ['https://browser-vps.hijrah-attauhid.or.id'] }
+        },
+        'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
+        'openai/widgetDescription': 'Browser bersama VPS At-Tauhid yang dapat dikendalikan langsung dari ChatGPT.',
+        'openai/widgetPrefersBorder': false,
+        'openai/widgetCSP': {
+          frame_domains: ['https://browser-vps.hijrah-attauhid.or.id']
+        }
+      }
     }] };
   });
 
@@ -697,7 +716,14 @@ function createServer(sshDefaultConfig) {
     const { name, arguments: args } = request.params;
 
     if (name === 'browser_view') {
-      return { content: [{ type: 'text', text: 'Panel browser bersama siap. Buka panel yang ditampilkan untuk mengakses browser.' }], _meta: { ui: { resourceUri: BROWSER_UI_URI }, 'openai/outputTemplate': BROWSER_UI_URI } };
+      const viewLink = browserViewLink();
+      return {
+        structuredContent: { ready: true },
+        content: [{ type: 'text', text: 'Browser VPS At-Tauhid siap ditampilkan pada panel interaktif.' }],
+        _meta: {
+          browserViewUrl: viewLink
+        }
+      };
     }
 
     if (name === 'browser_open') {
