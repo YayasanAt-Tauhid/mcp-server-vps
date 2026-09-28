@@ -3,6 +3,82 @@ import { chromium } from 'playwright-core';
 const CDP_URL = process.env.BROWSER_CDP_URL || 'http://127.0.0.1:9222';
 let browserClient = null;
 let activePage = null;
+let displayMode = 'desktop';
+let defaultUserAgent = null;
+const cdpSessions = new WeakMap();
+
+const DISPLAY_MODES = {
+  desktop: { width: 1366, height: 768, mobile: false, touch: false },
+  mobile: { width: 390, height: 844, mobile: true, touch: true }
+};
+
+async function getCdpSession(page) {
+  let session = cdpSessions.get(page);
+  if (session) return session;
+  const context = await getContext();
+  session = await context.newCDPSession(page);
+  cdpSessions.set(page, session);
+  page.once('close', () => {
+    cdpSessions.delete(page);
+    session.detach().catch(() => {});
+  });
+  return session;
+}
+
+async function applyDisplayMode(page) {
+  const cfg = DISPLAY_MODES[displayMode] || DISPLAY_MODES.desktop;
+  const session = await getCdpSession(page);
+  {
+    if (!defaultUserAgent) {
+      const version = await session.send('Browser.getVersion').catch(() => null);
+      defaultUserAgent = version?.userAgent || null;
+    }
+    if (displayMode === 'desktop') {
+      await session.send('Emulation.setDeviceMetricsOverride', {
+        width: cfg.width,
+        height: cfg.height,
+        deviceScaleFactor: 1,
+        mobile: false,
+        screenWidth: cfg.width,
+        screenHeight: cfg.height,
+        screenOrientation: { type: 'landscapePrimary', angle: 90 }
+      });
+      await session.send('Emulation.setTouchEmulationEnabled', { enabled: false }).catch(() => {});
+      if (defaultUserAgent) {
+        await session.send('Emulation.setUserAgentOverride', {
+          userAgent: defaultUserAgent,
+          platform: 'Linux'
+        }).catch(() => {});
+      }
+    } else {
+      await session.send('Emulation.setDeviceMetricsOverride', {
+        width: cfg.width,
+        height: cfg.height,
+        deviceScaleFactor: 1,
+        mobile: true,
+        screenWidth: cfg.width,
+        screenHeight: cfg.height,
+        screenOrientation: { type: 'portraitPrimary', angle: 0 }
+      });
+      await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(() => {});
+      if (defaultUserAgent) {
+        const mobileUa = defaultUserAgent.includes('(X11; Linux x86_64)')
+          ? defaultUserAgent.replace('(X11; Linux x86_64)', '(Linux; Android 13; Pixel 7)')
+          : defaultUserAgent;
+        await session.send('Emulation.setUserAgentOverride', {
+          userAgent: mobileUa,
+          platform: 'Android'
+        }).catch(() => {});
+      }
+    }
+  }
+}
+
+async function applyDisplayModeToAllPages() {
+  const context = await getContext();
+  const pages = context.pages().filter(p => !p.url().startsWith('chrome-extension://'));
+  await Promise.all(pages.map(page => applyDisplayMode(page).catch(() => {})));
+}
 
 const SECRET_RE = /(password|passwd|passcode|otp|one[-_ ]?time|token|secret|pin|2fa|mfa|verification[-_ ]?code|security[-_ ]?code)/i;
 
@@ -29,10 +105,15 @@ async function getPage(tabIndex) {
   if (typeof tabIndex === 'number') {
     if (!pages[tabIndex]) throw new Error('Tab index tidak ditemukan: ' + tabIndex);
     activePage = pages[tabIndex];
+    await applyDisplayMode(activePage).catch(() => {});
     return activePage;
   }
-  if (activePage && !activePage.isClosed() && pages.includes(activePage)) return activePage;
+  if (activePage && !activePage.isClosed() && pages.includes(activePage)) {
+    await applyDisplayMode(activePage).catch(() => {});
+    return activePage;
+  }
   activePage = pages[0] || await context.newPage();
+  await applyDisplayMode(activePage).catch(() => {});
   return activePage;
 }
 
@@ -56,6 +137,22 @@ async function summarize(page) {
     title: document.title,
     readyState: document.readyState
   }));
+}
+
+export async function browserSetMode(args = {}) {
+  const mode = String(args.mode || '').toLowerCase();
+  if (!DISPLAY_MODES[mode]) throw new Error('mode harus desktop atau mobile');
+  displayMode = mode;
+  await applyDisplayModeToAllPages();
+  const page = await getPage(args.tabIndex);
+  await page.waitForTimeout(250);
+  const viewport = await page.evaluate(() => ({
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    devicePixelRatio: window.devicePixelRatio,
+    userAgent: navigator.userAgent
+  })).catch(() => null);
+  return { mode: displayMode, target: DISPLAY_MODES[displayMode], viewport, ...(await summarize(page)) };
 }
 
 export async function browserOpen(args = {}) {
@@ -217,6 +314,7 @@ export async function browserTabs(args = {}) {
 
   if (action === 'new') {
     activePage = await context.newPage();
+    await applyDisplayMode(activePage).catch(() => {});
     if (args.url) {
       await activePage.goto(assertHttpUrl(args.url), { waitUntil: 'commit', timeout: args.timeoutMs || 15000 });
       await activePage.waitForTimeout(800);

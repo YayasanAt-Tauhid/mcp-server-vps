@@ -5,8 +5,13 @@ const frame = document.getElementById('browser');
 const loading = document.getElementById('loading');
 const status = document.getElementById('status');
 const external = document.getElementById('external');
+const desktopBtn = document.getElementById('mode-desktop');
+const mobileBtn = document.getElementById('mode-mobile');
+const fullscreenBtn = document.getElementById('mode-fullscreen');
 
 let opened = false;
+let connected = false;
+let currentMode = 'desktop';
 
 function safeUrl(value) {
   if (typeof value !== 'string' || !value) return null;
@@ -29,6 +34,13 @@ function extractUrl(value, depth = 0) {
     if (found) return found;
   }
   return null;
+}
+
+function setModeUi(mode) {
+  currentMode = mode;
+  desktopBtn.classList.toggle('active', mode === 'desktop');
+  mobileBtn.classList.toggle('active', mode === 'mobile');
+  document.body.classList.toggle('mobile-mode', mode === 'mobile');
 }
 
 function openView(value) {
@@ -55,7 +67,7 @@ function openFromCompatibilityBridge() {
   }
 }
 
-const app = new App({ name: 'Browser VPS At-Tauhid', version: '6.0.0' });
+const app = new App({ name: 'Browser VPS At-Tauhid', version: '7.0.0' });
 
 app.ontoolresult = (result) => {
   const url = extractUrl(result);
@@ -70,10 +82,52 @@ app.ontoolcancelled = () => {
   if (!opened) status.textContent = 'Pemanggilan browser dibatalkan';
 };
 
+async function setBrowserMode(mode) {
+  if (!connected || mode === currentMode) return;
+  const previous = currentMode;
+  setModeUi(mode);
+  status.textContent = mode === 'mobile' ? 'Mengaktifkan mode mobile…' : 'Mengaktifkan mode desktop…';
+  desktopBtn.disabled = true;
+  mobileBtn.disabled = true;
+  try {
+    const result = await app.callServerTool({
+      name: 'browser_set_mode',
+      arguments: { mode }
+    });
+    if (result?.isError) throw new Error('browser_set_mode gagal');
+    status.textContent = mode === 'mobile' ? 'Mobile · 390×844' : 'Desktop · 1366×768';
+  } catch (error) {
+    console.error('Failed to switch browser mode', error);
+    setModeUi(previous);
+    status.textContent = 'Gagal mengubah mode';
+  } finally {
+    desktopBtn.disabled = false;
+    mobileBtn.disabled = false;
+  }
+}
+
+desktopBtn.addEventListener('click', () => setBrowserMode('desktop'));
+mobileBtn.addEventListener('click', () => setBrowserMode('mobile'));
+
+fullscreenBtn.addEventListener('click', async () => {
+  if (!connected) return;
+  try {
+    await app.requestDisplayMode({ mode: 'fullscreen' });
+  } catch (error) {
+    console.error('Fullscreen request failed', error);
+    status.textContent = 'Fullscreen tidak tersedia';
+  }
+});
+
 async function start() {
+  setModeUi('desktop');
   openFromCompatibilityBridge();
   try {
     await app.connect();
+    connected = true;
+    desktopBtn.disabled = false;
+    mobileBtn.disabled = false;
+    fullscreenBtn.disabled = false;
     if (!opened) {
       status.textContent = 'Menunggu tiket browser…';
       openFromCompatibilityBridge();

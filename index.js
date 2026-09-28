@@ -12,7 +12,7 @@ import { Client } from 'ssh2';
 import SftpClient from 'ssh2-sftp-client';
 import {
   browserOpen, browserSnapshot, browserClick, browserType, browserSelect,
-  browserWait, browserScreenshot, browserTabs, browserBack, browserReload
+  browserWait, browserScreenshot, browserTabs, browserBack, browserReload, browserSetMode
 } from './browser-tools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,7 +28,7 @@ try {
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-v6.html';
+const BROWSER_UI_URI = 'ui://attauhid/browser-v7.html';
 const BROWSER_UI_URI_RE = /^ui:\/\/attauhid\/browser-v\d+\.html$/;
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 function browserViewLink() {
@@ -353,7 +353,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.5.0' },
+    { name: 'vps2-mcp', version: '3.6.0' },
     { capabilities: { tools: {}, resources: {} } }
   );
 
@@ -375,6 +375,24 @@ function createServer(sshDefaultConfig) {
           'openai/widgetAccessible': true,
           'openai/toolInvocation/invoking': 'Membuka browser VPS…',
           'openai/toolInvocation/invoked': 'Browser VPS siap'
+        }
+      },
+      {
+        name: 'browser_set_mode',
+        description: 'Ubah tampilan browser bersama antara desktop dan mobile. Mode mobile memakai emulasi viewport/touch browser sebenarnya, bukan sekadar memperkecil iframe.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mode: { type: 'string', enum: ['desktop','mobile'], description: 'Mode viewport browser' },
+            tabIndex: { type: 'number', description: 'Tab tujuan; default tab aktif' }
+          },
+          required: ['mode']
+        },
+        _meta: {
+          ui: { visibility: ['model', 'app'] },
+          'openai/widgetAccessible': true,
+          'openai/toolInvocation/invoking': 'Mengubah mode browser…',
+          'openai/toolInvocation/invoked': 'Mode browser diubah'
         }
       },
       {
@@ -736,6 +754,18 @@ function createServer(sshDefaultConfig) {
           'openai/outputTemplate': BROWSER_UI_URI
         }
       };
+    }
+
+    if (name === 'browser_set_mode') {
+      try {
+        const result = await browserSetMode(args || {});
+        return {
+          structuredContent: { mode: result.mode, viewport: result.viewport },
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Set Mode Error: ' + err.message }], isError: true };
+      }
     }
 
     if (name === 'browser_open') {
@@ -1176,13 +1206,13 @@ if (cliArgs.includes('--http')) {
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.5.0', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['browser_view','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
+    status: 'ok', version: '3.6.0', mode: 'http', auth: 'oauth2-password-protected',
+    tools: ['browser_view','browser_set_mode','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
   app.listen(PORT, () => {
-    console.error(`MCP SSH Server v3.5.0: http://0.0.0.0:${PORT}`);
+    console.error(`MCP SSH Server v3.6.0: http://0.0.0.0:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
@@ -1190,5 +1220,5 @@ if (cliArgs.includes('--http')) {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MCP SSH Server v3.5.0 siap! (stdio mode)');
+  console.error('MCP SSH Server v3.6.0 siap! (stdio mode)');
 }
