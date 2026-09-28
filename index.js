@@ -28,12 +28,12 @@ try {
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-v8.html';
-const BROWSER_UI_URI_RE = /^ui:\/\/attauhid\/browser-v\d+\.html$/;
+const BROWSER_UI_URI = 'ui://attauhid/browser-card-v1.html';
+const BROWSER_UI_URI_RE = /^ui:\/\/attauhid\/(?:browser-v\d+|browser-card-v\d+)\.html$/;
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 function browserViewLink() {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const expires = Date.now() + 120000;
+  const expires = Date.now() + 600000;
   const sig = crypto.createHmac('sha256', APPROVE_PASSWORD).update('browser-view:' + nonce + ':' + expires).digest('hex');
   return BROWSER_VIEW_URL + '?nonce=' + nonce + '&expires=' + expires + '&sig=' + sig;
 }
@@ -353,7 +353,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.7.0' },
+    { name: 'vps2-mcp', version: '3.8.0' },
     { capabilities: { tools: {}, resources: {} } }
   );
 
@@ -750,7 +750,7 @@ function createServer(sshDefaultConfig) {
     return { contents: [{
       uri: requestedUri,
       mimeType: 'text/html;profile=mcp-app',
-      text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8'),
+      text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8').replace('__BROWSER_VIEW_URL__', browserViewLink()),
       _meta: {
         ui: {
           prefersBorder: false,
@@ -760,7 +760,7 @@ function createServer(sshDefaultConfig) {
             frameDomains: ['https://browser-vps.hijrah-attauhid.or.id']
           }
         },
-        'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
+        'openai/ui': { availableDisplayModes: ['inline'] },
         'openai/widgetDescription': 'Browser bersama VPS At-Tauhid yang dapat dikendalikan langsung dari ChatGPT.',
         'openai/widgetPrefersBorder': false,
         'openai/widgetCSP': {
@@ -1252,13 +1252,13 @@ if (cliArgs.includes('--http')) {
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.7.0', mode: 'http', auth: 'oauth2-password-protected',
+    status: 'ok', version: '3.8.0', mode: 'http', auth: 'oauth2-password-protected',
     tools: ['browser_view','browser_get_view_url','browser_set_mode','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
   app.listen(PORT, () => {
-    console.error(`MCP SSH Server v3.7.0: http://0.0.0.0:${PORT}`);
+    console.error(`MCP SSH Server v3.8.0: http://0.0.0.0:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
@@ -1266,5 +1266,5 @@ if (cliArgs.includes('--http')) {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MCP SSH Server v3.7.0 siap! (stdio mode)');
+  console.error('MCP SSH Server v3.8.0 siap! (stdio mode)');
 }

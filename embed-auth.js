@@ -23,7 +23,7 @@ http.createServer((req,res)=>{
  if(req.method==='GET'){
   if(valid(req)){res.writeHead(302,{'Location':'/embed/vnc.html?path=embed/websockify&autoconnect=1','Cache-Control':'no-store'});return res.end();}
   const nonce=url.searchParams.get('nonce')||'', expires=Number(url.searchParams.get('expires')), sig=url.searchParams.get('sig')||'';
-  if(/^[a-f0-9]{32}$/.test(nonce) && Number.isSafeInteger(expires) && expires>Date.now() && expires<Date.now()+180000 && /^[a-f0-9]{64}$/.test(sig)){
+  if(/^[a-f0-9]{32}$/.test(nonce) && Number.isSafeInteger(expires) && expires>Date.now() && expires<Date.now()+660000 && /^[a-f0-9]{64}$/.test(sig)){
    const expected=signed(nonce,expires);
    if(crypto.timingSafeEqual(Buffer.from(sig,'hex'),Buffer.from(expected,'hex')))return grant(res);
   }
