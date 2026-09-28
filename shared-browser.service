@@ -1,0 +1,15 @@
+[Unit]
+Description=Safara Shared Browser
+After=network.target
+
+[Service]
+Type=simple
+User=safara
+WorkingDirectory=/home/safara/browser-agent
+ExecStart=/home/safara/browser-agent/run-shared-browser.sh
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

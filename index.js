@@ -4,6 +4,8 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
+import { createBrowserGateway } from './browser-gateway.js';
+import { sharedBrowserTools, registerBrowserResources, handleBrowserTool } from './shared-browser.js';
 import { readFileSync } from 'fs';
 import { resolve, dirname, extname, normalize, sep } from 'path';
 import { fileURLToPath } from 'url';
@@ -60,10 +62,11 @@ try {
   });
 } catch {}
 
-const MCP_VERSION = '3.9.0';
+const MCP_VERSION = '3.10.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'http://127.0.0.1:3100';
+const sharedBrowser = process.env.SHARED_BROWSER_ENABLED === 'true' ? createBrowserGateway({baseUrl:BASE_URL, secret:process.env.SHARED_BROWSER_SIGNING_KEY || APPROVE_PASSWORD}) : null;
 const ADB_TUNNEL_HOST = process.env.ADB_TUNNEL_HOST || '127.0.0.1';
 const ADB_TUNNEL_PORT = Number.parseInt(process.env.ADB_TUNNEL_PORT || '15037', 10);
 if (ADB_TUNNEL_HOST !== '127.0.0.1' || !Number.isInteger(ADB_TUNNEL_PORT) || ADB_TUNNEL_PORT < 1 || ADB_TUNNEL_PORT > 65535) {
@@ -389,17 +392,21 @@ async function sshUpload(connectionId, localPath, remotePath) {
   }
 }
 
-async function sshUploadBuffer(connectionId, buffer, remotePath, allowOverwrite = false) {
+async function sshUploadBuffer(connectionId, buffer, remotePath, allowOverwrite = false, allowedRoots = UPLOAD_ALLOWED_ROOTS) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
   const sftp = new SftpClient();
   try {
     await sftp.connect(config);
+    const realParent = await sftp.realPath(dirname(remotePath));
+    assertAllowedImagePath(realParent, allowedRoots);
+    const existingType = await sftp.exists(remotePath);
+    if (existingType === 'l' || (existingType && existingType !== '-')) throw new Error('destination_not_regular_file');
     if (!allowOverwrite) {
       const exists = await sftp.exists(remotePath);
       if (exists) throw new Error('destination_exists');
     }
-    await sftp.put(buffer, remotePath);
+    await sftp.put(buffer, remotePath, { writeStreamOptions: { flags: allowOverwrite ? 'w' : 'wx', mode: 0o600 } });
     await sftp.end();
     return `File berhasil diupload langsung: ${remotePath} (${buffer.length} bytes)`;
   } catch (err) {
@@ -422,7 +429,7 @@ function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds, 
   if (ttl < 60 || ttl > 3600) throw new Error('expiresInSeconds harus 60..3600');
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = Date.now() + ttl * 1000;
-  uploadSlots.set(token, { connectionId, remotePath: safeRemotePath, maxBytes: size, expiresAt, kind, allowOverwrite: !!allowOverwrite });
+  uploadSlots.set(token, { connectionId, remotePath: safeRemotePath, maxBytes: size, expiresAt, kind, allowOverwrite: !!allowOverwrite, allowedRoots: [...allowedRoots] });
   return {
     uploadUrl: `${BASE_URL}/upload-ui#token=${token}`,
     remotePath: safeRemotePath,
@@ -1399,11 +1406,13 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 function createServer(sshDefaultConfig) {
   const server = new Server(
     { name: 'vps2-mcp', version: MCP_VERSION },
-    { capabilities: { tools: {} }, instructions: CHAT_WORKFLOW_INSTRUCTIONS }
+    { capabilities: { tools: {}, ...(sharedBrowser ? {resources:{}} : {}) }, instructions: CHAT_WORKFLOW_INSTRUCTIONS }
   );
 
+  if (sharedBrowser) registerBrowserResources(server, sharedBrowser.issueLink, BASE_URL);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      ...(sharedBrowser ? sharedBrowserTools : []),
       {
         name: 'ssh_connect',
         description: sshDefaultConfig
@@ -1897,6 +1906,7 @@ function createServer(sshDefaultConfig) {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    if (sharedBrowser && sharedBrowserTools.some(tool => tool.name === name)) return handleBrowserTool(name, args || {}, sharedBrowser.issueLink);
 
     if (name === 'ssh_connect') {
       try {
@@ -2404,6 +2414,7 @@ if (cliArgs.includes('--http')) {
       .set('WWW-Authenticate', `Bearer realm="${BASE_URL}", authorization_uri="${BASE_URL}/oauth/authorize", resource_metadata="${BASE_URL}/.well-known/oauth-protected-resource"`)
       .json({ error: 'unauthorized', resource_metadata: `${BASE_URL}/.well-known/oauth-protected-resource` });
   }
+  if (sharedBrowser) sharedBrowser.mount(app);
   app.use(authMiddleware);
 
   const transports = {};
@@ -2462,10 +2473,11 @@ document.getElementById('upload').onclick=async()=>{
     const detectedKind = detectUploadKind(req.body);
     const validKind = slot.kind === 'apk' ? detectedKind === 'zip' : detectedKind === slot.kind;
     if (!validKind) return res.status(415).json({ error: 'file_signature_mismatch', expected: slot.kind });
+    if (uploadSlots.get(token) !== slot) return res.status(401).json({ error: 'invalid_or_used_upload_token' });
     // Consume before upload so a successful/failed attempt cannot be replayed.
     uploadSlots.delete(token);
     try {
-      await sshUploadBuffer(slot.connectionId, req.body, slot.remotePath, slot.allowOverwrite);
+      await sshUploadBuffer(slot.connectionId, req.body, slot.remotePath, slot.allowOverwrite, slot.allowedRoots);
       console.error(`[UPLOAD] ok path=${slot.remotePath} bytes=${req.body.length} kind=${slot.kind} overwrite=${slot.allowOverwrite}`);
       res.json({ ok: true, remotePath: slot.remotePath, bytes: req.body.length, kind: slot.kind });
     } catch (err) {
@@ -2520,15 +2532,16 @@ document.getElementById('upload').onclick=async()=>{
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_project', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: [...(sharedBrowser ? sharedBrowserTools.map(tool => tool.name) : []), 'ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_project', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
-  app.listen(PORT, BIND_HOST, () => {
+  const httpServer = app.listen(PORT, BIND_HOST, () => {
     console.error(`MCP SSH Server v${MCP_VERSION}: http://${BIND_HOST}:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
+  if (sharedBrowser) httpServer.on('upgrade', sharedBrowser.upgrade);
 } else {
   const server = createServer();
   const transport = new StdioServerTransport();
