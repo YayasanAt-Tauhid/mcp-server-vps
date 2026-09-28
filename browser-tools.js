@@ -358,4 +358,3 @@ export async function browserReload(args = {}) {
   await page.waitForTimeout(700);
   return await summarize(page);
 }
-
