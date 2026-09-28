@@ -28,7 +28,7 @@ try {
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-v7.html';
+const BROWSER_UI_URI = 'ui://attauhid/browser-v8.html';
 const BROWSER_UI_URI_RE = /^ui:\/\/attauhid\/browser-v\d+\.html$/;
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 function browserViewLink() {
@@ -353,7 +353,7 @@ function resetAttempts(ip) { failedAttempts.delete(ip); }
 
 function createServer(sshDefaultConfig) {
   const server = new Server(
-    { name: 'vps2-mcp', version: '3.6.0' },
+    { name: 'vps2-mcp', version: '3.7.0' },
     { capabilities: { tools: {}, resources: {} } }
   );
 
@@ -371,10 +371,29 @@ function createServer(sshDefaultConfig) {
         },
         _meta: {
           ui: { resourceUri: BROWSER_UI_URI, visibility: ['model', 'app'] },
+          'ui/resourceUri': BROWSER_UI_URI,
           'openai/outputTemplate': BROWSER_UI_URI,
           'openai/widgetAccessible': true,
           'openai/toolInvocation/invoking': 'Membuka browser VPS…',
           'openai/toolInvocation/invoked': 'Browser VPS siap'
+        }
+      },
+      {
+        name: 'browser_get_view_url',
+        description: 'Ambil URL sesi browser sementara untuk panel MCP App. Tool ini hanya untuk dipanggil UI browser, bukan model.',
+        inputSchema: { type: 'object', properties: {} },
+        outputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            expiresAt: { type: 'number' }
+          },
+          required: ['url', 'expiresAt'],
+          additionalProperties: false
+        },
+        _meta: {
+          ui: { visibility: ['app'] },
+          'openai/widgetAccessible': true
         }
       },
       {
@@ -707,7 +726,21 @@ function createServer(sshDefaultConfig) {
   }));
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-    resources: [{ uri: BROWSER_UI_URI, name: 'Browser VPS At-Tauhid', mimeType: 'text/html;profile=mcp-app' }]
+    resources: [{
+      uri: BROWSER_UI_URI,
+      name: 'Browser VPS At-Tauhid',
+      mimeType: 'text/html;profile=mcp-app',
+      _meta: {
+        ui: {
+          prefersBorder: false,
+          csp: {
+            connectDomains: [],
+            resourceDomains: [],
+            frameDomains: ['https://browser-vps.hijrah-attauhid.or.id']
+          }
+        }
+      }
+    }]
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
@@ -754,6 +787,19 @@ function createServer(sshDefaultConfig) {
           'openai/outputTemplate': BROWSER_UI_URI
         }
       };
+    }
+
+    if (name === 'browser_get_view_url') {
+      try {
+        const url = browserViewLink();
+        const expiresAt = Number(new URL(url).searchParams.get('expires'));
+        return {
+          structuredContent: { url, expiresAt },
+          content: [{ type: 'text', text: 'URL sesi browser siap untuk panel.' }]
+        };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser View URL Error: ' + err.message }], isError: true };
+      }
     }
 
     if (name === 'browser_set_mode') {
@@ -1206,13 +1252,13 @@ if (cliArgs.includes('--http')) {
   });
 
   app.get('/health', (req, res) => res.json({
-    status: 'ok', version: '3.6.0', mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['browser_view','browser_set_mode','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
+    status: 'ok', version: '3.7.0', mode: 'http', auth: 'oauth2-password-protected',
+    tools: ['browser_view','browser_get_view_url','browser_set_mode','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_write_file', 'ssh_download', 'ssh_list_files', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
   app.listen(PORT, () => {
-    console.error(`MCP SSH Server v3.6.0: http://0.0.0.0:${PORT}`);
+    console.error(`MCP SSH Server v3.7.0: http://0.0.0.0:${PORT}`);
     console.error(`Mode: OAuth2 + Password + Rate Limiting + DCR + Upload/Download + Whitelist/Blacklist`);
   });
 
@@ -1220,5 +1266,5 @@ if (cliArgs.includes('--http')) {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('MCP SSH Server v3.6.0 siap! (stdio mode)');
+  console.error('MCP SSH Server v3.7.0 siap! (stdio mode)');
 }

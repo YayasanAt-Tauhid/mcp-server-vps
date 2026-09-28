@@ -128,6 +128,21 @@ async function start() {
     desktopBtn.disabled = false;
     mobileBtn.disabled = false;
     fullscreenBtn.disabled = false;
+
+    if (!opened) {
+      status.textContent = 'Mengambil sesi browser…';
+      try {
+        const session = await app.callServerTool({
+          name: 'browser_get_view_url',
+          arguments: {}
+        });
+        const directUrl = safeUrl(session?.structuredContent?.url);
+        if (directUrl) openView(directUrl);
+      } catch (error) {
+        console.error('Failed to get browser view URL', error);
+      }
+    }
+
     if (!opened) {
       status.textContent = 'Menunggu tiket browser…';
       openFromCompatibilityBridge();
