@@ -43,7 +43,7 @@ Integration script is specific to this VPS; it uses the existing local SSH ident
 
 ## Source synchronization
 
-At-Tauhid git fetch to origin returned HTTP 403 on 2026-09-28. origin/main is stale locally. Do not force push or assume it matches Safara main. Reconcile with the latest upstream in a separate branch after repository access is repaired. Existing At-Tauhid browser commits and unrelated merchant_orders.tsx are preserved.
+GitHub synchronization was repaired on 2026-09-28 by switching origin from HTTPS (HTTP 403) to the existing authorized SSH identity: git@github.com:YayasanAt-Tauhid/mcp-server-vps.git. The At-Tauhid release is pushed to origin/feat/attauhid-safara-parity. origin/main contains the separate Safara deployment and intentionally differs from the At-Tauhid checkout. Do not force push or pull/merge origin/main into the live At-Tauhid checkout without reviewing the deployment-specific differences. Existing At-Tauhid browser commits and unrelated merchant_orders.tsx are preserved.
 
 ## Client refresh and rollback
 
