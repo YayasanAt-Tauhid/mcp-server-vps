@@ -15,6 +15,9 @@ let viewTimeout;
 let opened = false;
 let connected = false;
 let currentMode = 'desktop';
+let hostContext = {};
+let displayMode = 'inline';
+let lastReportedHeight = 0;
 
 function safeUrl(value) {
   if (typeof value !== 'string' || !value) return null;
@@ -51,7 +54,6 @@ function openView(value) {
   if (!url || opened) return false;
   opened = true;
   external.href = url;
-  external.style.display = 'inline';
   status.textContent = 'Menghubungkan layar…';
   viewTimeout = setTimeout(() => {
     if (viewState !== 'connected') status.textContent = 'Layar belum tersambung — buka ulang panel jika sesi berakhir';
@@ -100,7 +102,48 @@ function openFromCompatibilityBridge() {
   }
 }
 
-const app = new App({ name: 'Browser VPS At-Tauhid', version: '7.1.0' });
+const app = new App(
+  { name: 'Browser VPS At-Tauhid', version: '7.2.0' },
+  { availableDisplayModes: ['inline', 'fullscreen'] },
+  { autoResize: false }
+);
+
+function applyHostContext(context = {}) {
+  hostContext = { ...hostContext, ...context };
+  if (['inline', 'fullscreen', 'pip'].includes(hostContext.displayMode)) {
+    displayMode = hostContext.displayMode;
+  }
+  const dimensions = hostContext.containerDimensions || {};
+  const hostHeight = Number(dimensions.height);
+  const maxHeight = Number(dimensions.maxHeight);
+  const viewportHeight = window.visualViewport?.height || window.innerHeight || 600;
+  const height = displayMode === 'fullscreen'
+    ? (hostHeight > 0 ? hostHeight : viewportHeight)
+    : Math.min(600, maxHeight > 0 ? maxHeight : 600, hostHeight > 0 ? hostHeight : 600);
+  const panelHeight = Math.max(160, Math.round(height));
+  document.documentElement.style.setProperty('--panel-height', panelHeight + 'px');
+  document.body.classList.toggle('fullscreen-mode', displayMode === 'fullscreen');
+  fullscreenBtn.textContent = displayMode === 'fullscreen' ? '⛶ Kecilkan' : '⛶ Fullscreen';
+  fullscreenBtn.title = displayMode === 'fullscreen' ? 'Kembali ke percakapan' : 'Layar penuh';
+  fullscreenBtn.setAttribute('aria-pressed', String(displayMode === 'fullscreen'));
+  const modes = hostContext.availableDisplayModes;
+  const canExpand = !Array.isArray(modes) || modes.includes('fullscreen');
+  fullscreenBtn.disabled = !connected || (displayMode !== 'fullscreen' && !canExpand);
+  if (!canExpand && displayMode !== 'fullscreen') external.style.display = 'inline';
+  if (connected && displayMode !== 'fullscreen' && lastReportedHeight !== panelHeight) {
+    lastReportedHeight = panelHeight;
+    app.sendSizeChanged({ height: panelHeight }).catch(() => {});
+  }
+}
+
+app.onhostcontextchanged = context => applyHostContext(context);
+window.addEventListener('resize', () => applyHostContext());
+window.visualViewport?.addEventListener('resize', () => applyHostContext());
+window.addEventListener('openai:set_globals', event => {
+  const globals = event.detail?.globals;
+  if (globals?.displayMode) applyHostContext({ displayMode: globals.displayMode });
+});
+
 
 app.ontoolresult = (result) => {
   const url = extractUrl(result);
@@ -145,23 +188,46 @@ mobileBtn.addEventListener('click', () => setBrowserMode('mobile'));
 
 fullscreenBtn.addEventListener('click', async () => {
   if (!connected) return;
+  const requestedMode = displayMode === 'fullscreen' ? 'inline' : 'fullscreen';
+  fullscreenBtn.disabled = true;
   try {
-    await app.requestDisplayMode({ mode: 'fullscreen' });
-  } catch (error) {
-    console.error('Fullscreen request failed', error);
-    status.textContent = 'Fullscreen tidak tersedia';
+    const result = await app.requestDisplayMode({ mode: requestedMode }, { timeout: 8000 });
+    applyHostContext({ displayMode: result.mode });
+    if (result.mode !== requestedMode) {
+      status.textContent = 'Mode layar penuh belum tersedia';
+      external.style.display = 'inline';
+    }
+  } catch {
+    status.textContent = 'Layar penuh gagal dibuka — gunakan layar terpisah';
+    external.style.display = 'inline';
+  } finally {
+    applyHostContext();
+  }
+});
+
+external.addEventListener('click', async event => {
+  if (!connected) return;
+  event.preventDefault();
+  try {
+    const session = await app.callServerTool({ name: 'browser_get_view_url', arguments: {} });
+    const url = safeUrl(session?.structuredContent?.url);
+    if (!url) throw new Error('Sesi browser belum tersedia');
+    await app.openLink({ url });
+  } catch {
+    status.textContent = 'Layar terpisah gagal dibuka; coba buka ulang panel';
   }
 });
 
 async function start() {
   setModeUi('desktop');
+  applyHostContext();
   openFromCompatibilityBridge();
   try {
     await app.connect();
     connected = true;
     desktopBtn.disabled = false;
     mobileBtn.disabled = false;
-    fullscreenBtn.disabled = false;
+    applyHostContext(app.getHostContext() || {});
 
     if (!opened) {
       status.textContent = 'Mengambil sesi browser…';

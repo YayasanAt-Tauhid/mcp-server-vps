@@ -118,3 +118,32 @@ the updated Nginx config, and rebuilt browser-ui.html. Validate/reload Nginx,
 restart attauhid-browser-embed-auth.service, then mcp-vps2.service. Auth/MCP
 in-memory sessions restart, so open a new browser panel. Do not restart the shared
 attauhid-browser.service for this change.
+
+## Fullscreen panel repair (2026-09-29)
+
+The MCP resource declared only inline mode and the App initialization did not
+advertise any availableDisplayModes, although the button requested fullscreen.
+Both resource discovery/contents and App capabilities now declare inline and
+fullscreen, as documented at https://developers.openai.com/plugins/reference.
+
+The panel uses host-provided container height and a flex layout instead of fixed
+header-height subtraction. Fullscreen has an explicit Kecilkan action. Display
+mode changes retain the existing browser iframe/session. Initial fullscreen
+mounts can request a fresh viewer session without requiring replay of tool output.
+Unsupported/rejected fullscreen keeps the inline screen visible and offers Buka
+layar terpisah using a fresh signed session and the host open-link capability.
+
+Resource URI: browser-card-v4.html. The fullscreen button now includes the visible
+word Fullscreen, which helps distinguish this bundle from a cached icon-only UI.
+ChatGPT may retain old resource/tool metadata; the user screenshot and absence of
+new resources/read requests showed the older bundle was still being displayed.
+A connector metadata refresh may be required to load this release.
+
+Validation: node browser-panel.integration.mjs passed seven checks using the
+actual MCP SDK, a local MCP stdio server, and a simulated mobile host: resource
+metadata, initialization capabilities, visible fullscreen geometry, resize/inline
+return without iframe navigation, failure recovery, direct fullscreen mount, and
+an unsupported-mode host. The framebuffer is stubbed in this test so it exercises
+panel lifecycle without altering the shared browser. This is not a physical
+ChatGPT Android end-to-end test. The earlier WebSocket/auth tests still apply;
+those services were not changed or restarted for this fullscreen update.
