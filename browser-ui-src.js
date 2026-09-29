@@ -53,11 +53,11 @@ function openView(value) {
   const url = safeUrl(value);
   if (!url || opened) return false;
   opened = true;
-  external.href = url;
+  external.href = ORIGIN + '/embed/login';
   status.textContent = 'Menghubungkan layar…';
   viewTimeout = setTimeout(() => {
-    if (viewState !== 'connected') status.textContent = 'Layar belum tersambung — buka ulang panel jika sesi berakhir';
-  }, 20000);
+    if (viewState !== 'connected') showBlockedFallback('Layar belum tampil. Gunakan Buka layar terpisah.');
+  }, 12000);
   loading.style.display = 'none';
   frame.style.display = 'block';
   frame.src = url;
@@ -73,8 +73,23 @@ function showViewState() {
     auth: 'Sesi berakhir — buka ulang panel'
   };
   status.textContent = labels[viewState] || labels.connecting;
-  retryBtn.hidden = !['error', 'disconnected'].includes(viewState);
+  retryBtn.hidden = !['error', 'disconnected', 'auth', 'blocked'].includes(viewState);
+  if (viewState === 'connected') loading.style.display = 'none';
 }
+
+function showBlockedFallback(message){
+  viewState='blocked';
+  status.textContent=message;
+  loading.style.display='grid';
+  loading.textContent='Panel belum dapat menampilkan browser. Buka layar terpisah untuk login, lalu lanjutkan melalui tool browser.';
+  retryBtn.hidden=false;
+}
+window.addEventListener('securitypolicyviolation',event=>{
+  if(['frame-src','child-src'].includes(event.effectiveDirective)&&event.blockedURI.startsWith(ORIGIN)){
+    clearTimeout(viewTimeout);
+    showBlockedFallback('Iframe diblokir oleh aplikasi. Buka layar terpisah.');
+  }
+});
 
 window.addEventListener('message', (event) => {
   if (event.origin !== ORIGIN || event.source !== frame.contentWindow) return;
@@ -87,8 +102,15 @@ window.addEventListener('message', (event) => {
   showViewState();
 });
 
-retryBtn.addEventListener('click', () => {
-  frame.contentWindow?.postMessage({ type: 'attauhid-browser-retry' }, ORIGIN);
+retryBtn.addEventListener('click', async () => {
+  if (['auth','blocked'].includes(viewState)) {
+    try {
+      const session=await app.callServerTool({name:'browser_get_view_url',arguments:{}});
+      const url=safeUrl(session?.structuredContent?.url);
+      if(!url) throw Error('ticket');
+      opened=false;viewState='connecting';openView(url);
+    } catch { showBlockedFallback('Panel gagal dimuat. Buka layar terpisah.'); }
+  } else frame.contentWindow?.postMessage({ type: 'attauhid-browser-retry' }, ORIGIN);
 });
 
 function openFromCompatibilityBridge() {
@@ -103,7 +125,7 @@ function openFromCompatibilityBridge() {
 }
 
 const app = new App(
-  { name: 'Browser VPS At-Tauhid', version: '7.2.0' },
+  { name: 'Browser VPS At-Tauhid', version: '7.3.0' },
   { availableDisplayModes: ['inline', 'fullscreen'] },
   { autoResize: false }
 );
@@ -168,7 +190,7 @@ async function setBrowserMode(mode) {
   try {
     const result = await app.callServerTool({
       name: 'browser_set_mode',
-      arguments: { mode }
+      arguments: { mode, ...(mode === 'mobile' ? { width: Math.max(320, Math.min(640, Math.round(frame.clientWidth))), height: Math.max(320, Math.min(768, Math.round(frame.clientHeight))) } : {}) }
     });
     if (result?.isError) throw new Error('browser_set_mode gagal');
     frame.contentWindow?.postMessage({ type: 'attauhid-browser-mode-refresh' }, ORIGIN);

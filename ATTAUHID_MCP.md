@@ -147,3 +147,78 @@ an unsupported-mode host. The framebuffer is stubbed in this test so it exercise
 panel lifecycle without altering the shared browser. This is not a physical
 ChatGPT Android end-to-end test. The earlier WebSocket/auth tests still apply;
 those services were not changed or restarted for this fullscreen update.
+
+## Responsive mobile and Claude embed (2026-09-29)
+
+The live public `/embed/login` response was inspected before this change. It had
+neither Content-Security-Policy nor X-Frame-Options. Thus the reported Claude
+ERR_BLOCKED_BY_CSP was not evidence of an existing ChatGPT-only ancestor policy.
+The MCP resource already declared `_meta.ui.csp.frameDomains`; a host-side
+`frame-src` restriction cannot be loosened by this server.
+
+Mobile now synchronizes three sizes: the visible phone panel, Chromium's emulated
+viewport, and x11vnc's clipped framebuffer. Chromium enters fullscreen to remove
+its desktop chrome, and the launcher disables the testing infobar. Width adapts
+between 320 and 640 CSS pixels; height adapts between 320 and 768 (the current Xvfb
+screen height). Desktop restores the entire 1366x768 framebuffer and window UI.
+ResizeObserver handles panel expansion, collapse and phone size changes. The
+shared display settings are atomic JSON, with compatibility for the old mode-only
+state file. Simultaneous viewers still share one Chromium and display mode.
+`run-attauhid-browser.sh` is the deployment copy of browser-agent/run-stack.sh;
+it restores the previous browser session and suppresses the crash-restore bubble.
+
+The outer card has a compact toolbar and always offers Buka tab. It obtains a NEW
+signed URL on each external-open click; CSP errors/timeouts also expose a readable
+fallback and refresh action. The viewer accepts parent messages from the configured
+ChatGPT and Claude origins. Claude resources advertise a stable, server-specific
+claudemcpcontent.com domain. The resource is browser-card-v5.html.
+
+Nginx and the auth service now apply a limited frame-ancestors policy to the login,
+redirect and viewer responses. The defaults are self, ChatGPT's two frontends and
+its web-sandbox origin family, claude.ai, and the exact Claude sandbox hashes for
+this server's root, trailing-slash root and /sse URLs. No universal wildcard or
+wildcard Claude content domain is allowed. For an additional confirmed origin,
+update BROWSER_EMBED_ANCESTORS and the matching header in
+attauhid-browser.nginx.conf, validate with nginx -t, reload Nginx and restart auth.
+Keep the lists consistent: all ancestors of a nested iframe must be permitted.
+Do not add X-Frame-Options SAMEORIGIN/DENY to these cross-origin embed routes.
+
+Signed browser login URLs now expire after two minutes and can create a session
+only once. Used nonces are persisted with mode 0600 until expiry so an auth-service
+restart does not re-enable a consumed URL. Session cookies retain their existing
+eight-hour lifetime and HttpOnly/Secure/SameSite=None/Partitioned attributes.
+An already authenticated browser can continue using its session. A new tab or
+client partition gets a fresh signed URL, or uses /embed/login with the connector
+approval password. Login URL queries and WebSocket tickets are omitted from the
+Nginx access log. The browser profile and tool restrictions on sensitive input
+remain in place.
+
+Inspect public headers with GET (without consuming a real signed ticket):
+
+```sh
+curl -sS --max-time 20 -D - -o /dev/null \
+  https://browser-vps.hijrah-attauhid.or.id/embed/login \
+  | grep -Ei '^(HTTP/|content-security-policy:|x-frame-options:|referrer-policy:|cache-control:)'
+```
+
+For an authenticated redirect chain, use a fresh ticket in DevTools Network with
+Preserve log and inspect login -> view -> vnc.html. Do not paste nonce/sig or the
+session cookie into diagnostic reports. A frame-ancestors violation is a server
+allowlist issue; a frame-src violation is the embedding host's policy. If Claude
+still refuses nested iframes, Buka tab (or the plain /embed/login URL) is the supported
+fallback, with browser_open/browser_snapshot/browser_screenshot for subsequent
+agent work. Disabling CSP is unnecessary.
+
+Validation: 55 unit tests; 7 simulated MCP fullscreen/bridge checks; 12 isolated
+Nginx/auth/noVNC checks including restricted ancestors, replay rejection, WebSocket
+protection and simulated nested Claude origins; 3 real live mobile checks for
+360px rendering, actual noVNC pointer alignment, adaptive height/width, and switching
+back to desktop. A final 360x638 framebuffer exactly matched its display area and
+visually showed the full-width login form. Actual Claude and the user's physical
+ChatGPT Android client were not directly exercised.
+
+The release was built from origin/attauhid in an isolated worktree. Deployment
+preserves the newer mobile OAuth approval form in the live index.js; that unrelated
+change is deliberately not included in this browser commit. Safara/main is not
+modified. Before deployment, affected live files and Nginx/launcher configuration
+were saved under /home/attauhid/private/mcp-backups/mobile-claude-20260929-110429.

@@ -17,7 +17,7 @@ button.active{background:#e2e8f0;color:#0f172a}
 button:disabled{opacity:.5;cursor:wait}
 .stage{flex:1;min-height:0;display:flex;justify-content:center;background:#0b1020;position:relative}
 .frame-wrap{width:100%;height:100%}
-.stage.mobile .frame-wrap{max-width:430px}
+.stage.mobile .frame-wrap{max-width:640px}
 iframe{display:block;width:100%;height:100%;border:0;background:#0f172a}
 .notice{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;background:#111827}
 .notice[hidden],button[hidden]{display:none}
@@ -50,7 +50,9 @@ const notice=document.getElementById('notice');
 const vnc=document.getElementById('vnc');
 const isEmbedded=window.parent!==window;
 document.body.classList.toggle('embedded',isEmbedded);
-let currentMode='desktop', state='connecting', observer, timeout, retryTimer;
+const allowedParents=/*__ALLOWED_PARENTS__*/[];
+let currentMode='desktop', state='connecting', observer, timeout, retryTimer, resizeTimer;
+let modeBusy=false, lastSize='';
 let attempts=0, generation=0, lastState='', manualDisconnect=false, loaded=false;
 
 function notifyParent(){
@@ -70,21 +72,42 @@ function paint(mode){
   stage.classList.toggle('mobile',currentMode==='mobile');
   notifyParent();
 }
-async function refreshMode(){
+function mobileSize(){
+  const rect=stage.querySelector('.frame-wrap').getBoundingClientRect();
+  return {width:Math.max(320,Math.min(640,Math.round(rect.width))),height:Math.max(320,Math.min(768,Math.round(rect.height)))};
+}
+async function refreshMode(initial=false){
   try{
     const r=await fetch('/embed/mode',{cache:'no-store'});
-    if(r.ok) paint((await r.json()).mode);
+    if(r.ok){
+      const result=await r.json();
+      paint(result.mode);
+      if(initial) await change(matchMedia('(max-width:700px)').matches?'mobile':result.mode);
+      else if(result.mode==='mobile') scheduleResize();
+    }
   }catch{}
 }
 async function change(mode){
+  if(modeBusy){scheduleResize();return;}
+  modeBusy=true;
   desktop.disabled=true;mobile.disabled=true;
   try{
-    const r=await fetch('/embed/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    const size=mode==='mobile'?mobileSize():{};
+    const r=await fetch('/embed/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,...size})});
     if(!r.ok) throw Error('mode');
-    paint((await r.json()).mode);
+    const result=await r.json();
+    paint(result.mode);
+    lastSize=result.mode==='mobile'?JSON.stringify(mobileSize()):'';
   }catch{status.textContent='Gagal mengubah mode'}
-  finally{desktop.disabled=false;mobile.disabled=false}
+  finally{modeBusy=false;desktop.disabled=false;mobile.disabled=false}
 }
+function scheduleResize(){
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{
+    if(currentMode==='mobile'&&JSON.stringify(mobileSize())!==lastSize) change('mobile');
+  },350);
+}
+new ResizeObserver(scheduleResize).observe(stage);
 function retryAfterFailure(){
   if(manualDisconnect||attempts>=2||retryTimer) return;
   attempts++;
@@ -105,9 +128,14 @@ function observeVnc(){
     const next=root.classList.contains('noVNC_connected')?'connected':
       root.classList.contains('noVNC_connecting')||root.classList.contains('noVNC_reconnecting')?'connecting':
       error?'error':hadConnection?'disconnected':'connecting';
+    const banner=doc.getElementById('noVNC_status');
+    if(next==='connected'&&!error&&banner?.classList.contains('noVNC_open')) banner.classList.remove('noVNC_open');
     if(next===lastState) return;
     lastState=next;
-    if(next==='connected'){hadConnection=true;clearTimeout(timeout)}
+    if(next==='connected'){
+      if(!hadConnection) doc.getElementById('noVNC_control_bar')?.classList.remove('noVNC_open');
+      hadConnection=true;clearTimeout(timeout);
+    }
     setState(next);
     if(next==='error'||(next==='disconnected'&&!manualDisconnect)){
       clearTimeout(timeout);retryAfterFailure();
@@ -161,7 +189,7 @@ async function connect(){
 window.addEventListener('message',event=>{
   if(event.source!==window.parent||!isEmbedded) return;
   if(!/^https:\/\/[a-z0-9_-]+\.web-sandbox\.oaiusercontent\.com$/.test(event.origin)&&
-     !['https://chatgpt.com','https://chat.openai.com'].includes(event.origin)) return;
+     event.origin!==location.origin&&!allowedParents.includes(event.origin)) return;
   if(event.data?.type==='attauhid-browser-retry'){attempts=0;connect()}
   if(event.data?.type==='attauhid-browser-mode-refresh') refreshMode();
 });
@@ -174,7 +202,7 @@ fullscreen.addEventListener('click',async()=>{
     else await document.exitFullscreen();
   }catch{status.textContent='Fullscreen tidak tersedia'}
 });
-refreshMode();
+refreshMode(true);
 connect();
 </script>
 </body>

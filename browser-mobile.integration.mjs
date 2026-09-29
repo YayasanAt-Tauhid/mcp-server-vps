@@ -1,0 +1,60 @@
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { readFile, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { chromium } from 'playwright-core';
+
+const root='/home/attauhid/projects/mcp/mcp-server';
+const key=(await readFile(root+'/.env','utf8')).split('\n').find(line=>line.startsWith('APPROVE_PASSWORD='))?.slice(17).trim();
+const origin='https://browser-vps.hijrah-attauhid.or.id';
+const temp=await mkdtemp(join(tmpdir(),'browser-mobile-live-'));
+let shared, viewer, fixture, previous;
+try {
+  shared=await chromium.connectOverCDP('http://127.0.0.1:9222');
+  const context=shared.contexts()[0];
+  for(const page of context.pages()) if(await page.evaluate(()=>document.visibilityState==='visible').catch(()=>false)) previous=page;
+  fixture=await context.newPage();
+  await fixture.setContent('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:#fff;font:18px system-ui}button{margin:80px 24px;height:64px;width:calc(100% - 48px);font:24px system-ui;background:#166534;color:white}p{padding:24px}</style><button id="target">Uji ketukan</button><p id="count">0</p><script>target.onclick=()=>count.textContent=Number(count.textContent)+1</script>');
+  await fixture.bringToFront();
+  viewer=await chromium.launch({headless:true,chromiumSandbox:true,executablePath:'/opt/mcp-attauhid/chromium-1243/chrome-linux64/chrome'});
+  const page=await viewer.newPage({viewport:{width:360,height:740}});
+  const nonce=crypto.randomBytes(16).toString('hex'),expires=Date.now()+120000;
+  const sig=crypto.createHmac('sha256',key).update('browser-view:'+nonce+':'+expires).digest('hex');
+  await page.goto(origin+'/embed/login?'+new URLSearchParams({nonce,expires:String(expires),sig}),{waitUntil:'domcontentloaded'});
+  await page.waitForFunction(()=>document.querySelector('#status')?.textContent==='Terhubung',null,{timeout:25000});
+  const frame=page.frames().find(f=>f.url().includes('/embed/vnc.html'));
+  assert.ok(frame);
+  await frame.waitForFunction(()=>document.querySelector('#noVNC_container canvas')?.width===360);
+  await fixture.waitForFunction(()=>innerWidth===360);
+  const canvas=frame.locator('#noVNC_container canvas');
+  const box=await canvas.boundingBox(), target=await fixture.locator('#target').boundingBox();
+  const pixels=await canvas.evaluate(c=>({width:c.width,height:c.height}));
+  await page.mouse.click(box.x+(target.x+target.width/2)*box.width/pixels.width,box.y+(target.y+target.height/2)*box.height/pixels.height);
+  await fixture.waitForFunction(()=>document.querySelector('#count').textContent==='1');
+  console.log('PASS portrait framebuffer and actual noVNC pointer coordinates at 360px');
+  await page.setViewportSize({width:390,height:680});
+  await frame.waitForFunction(()=>document.querySelector('#noVNC_container canvas')?.width===390);
+  await fixture.waitForFunction(()=>innerWidth===390);
+  const stage=await page.locator('.frame-wrap').boundingBox();
+  assert.equal(await canvas.evaluate(c=>c.height),Math.round(stage.height));
+  console.log('PASS viewport and framebuffer resize with the phone panel height');
+  await page.locator('#desktop').click();
+  await frame.waitForFunction(()=>document.querySelector('#noVNC_container canvas')?.width===1366);
+  await page.locator('#mobile').click();
+  await frame.waitForFunction(()=>document.querySelector('#noVNC_container canvas')?.width===390);
+  console.log('PASS desktop/mobile switching restores both browser and framebuffer');
+  await fixture.close();fixture=null;
+  await previous?.bringToFront();
+  await page.waitForTimeout(700);
+  await page.screenshot({path:join(temp,'mobile-viewer.png')});
+  console.log(JSON.stringify({screenshot:join(temp,'mobile-viewer.png')}));
+} catch(error) {
+  console.error(error.message.replace(/nonce=[^\s]+/g,'[signed URL redacted]'));
+  process.exitCode=1;
+} finally {
+  await fixture?.close();
+  await previous?.bringToFront();
+  await viewer?.close();
+  await shared?.close();
+}

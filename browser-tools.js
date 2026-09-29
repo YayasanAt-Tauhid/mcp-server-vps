@@ -1,5 +1,9 @@
 import { chromium } from 'playwright-core';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { displayConfig, parseDisplayState } from './browser-display.js';
+const runFile = promisify(execFile);
 
 const CDP_URL = process.env.BROWSER_CDP_URL || 'http://127.0.0.1:9222';
 let browserClient = null;
@@ -9,27 +13,41 @@ let defaultUserAgent = null;
 const cdpSessions = new WeakMap();
 const DISPLAY_MODE_STATE_FILE = process.env.BROWSER_DISPLAY_MODE_STATE_FILE || '/tmp/attauhid-browser-display-mode';
 
-const DISPLAY_MODES = {
-  desktop: { width: 1366, height: 768, mobile: false, touch: false },
-  mobile: { width: 390, height: 844, mobile: true, touch: true }
-};
+let currentDisplay = displayConfig('desktop');
+let modeQueue = Promise.resolve();
 
 function readDisplayModeState() {
-  try {
-    const mode = readFileSync(DISPLAY_MODE_STATE_FILE, 'utf8').trim();
-    return DISPLAY_MODES[mode] ? mode : displayMode;
-  } catch {
-    return displayMode;
-  }
+  try { currentDisplay = parseDisplayState(readFileSync(DISPLAY_MODE_STATE_FILE, 'utf8')); } catch {}
+  return currentDisplay.mode;
 }
 
-function writeDisplayModeState(mode) {
-  writeFileSync(DISPLAY_MODE_STATE_FILE, mode + '\n', { mode: 0o600 });
+function writeDisplayModeState(config) {
+  const temporary = DISPLAY_MODE_STATE_FILE + '.' + process.pid + '.tmp';
+  writeFileSync(temporary, JSON.stringify(config), { mode: 0o600 });
+  renameSync(temporary, DISPLAY_MODE_STATE_FILE);
 }
 
 export function browserCurrentMode() {
   displayMode = readDisplayModeState();
   return displayMode;
+}
+
+export function browserCurrentDisplay() {
+  readDisplayModeState();
+  return currentDisplay;
+}
+
+async function syncSharedScreen(page, config) {
+  const session = await getCdpSession(page);
+  const { windowId, bounds } = await session.send('Browser.getWindowForTarget');
+  const windowState = config.mobile ? 'fullscreen' : 'maximized';
+  if (bounds.windowState !== windowState) {
+    if (!config.mobile) await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+    await session.send('Browser.setWindowBounds', { windowId, bounds: { windowState } });
+  }
+  // noVNC must receive the portrait framebuffer, not the full desktop scaled down.
+  const clip = config.mobile ? `${config.width}x${config.height}+0+0` : '';
+  await runFile('x11vnc', ['-display', process.env.BROWSER_X_DISPLAY || ':99', '-sync', '-R', 'clip:' + clip], { timeout: 7000 });
 }
 
 async function getCdpSession(page) {
@@ -47,7 +65,7 @@ async function getCdpSession(page) {
 
 async function applyDisplayMode(page) {
   displayMode = readDisplayModeState();
-  const cfg = DISPLAY_MODES[displayMode] || DISPLAY_MODES.desktop;
+  const cfg = currentDisplay;
   const session = await getCdpSession(page);
   {
     if (!defaultUserAgent) {
@@ -55,15 +73,7 @@ async function applyDisplayMode(page) {
       defaultUserAgent = version?.userAgent || null;
     }
     if (displayMode === 'desktop') {
-      await session.send('Emulation.setDeviceMetricsOverride', {
-        width: cfg.width,
-        height: cfg.height,
-        deviceScaleFactor: 1,
-        mobile: false,
-        screenWidth: cfg.width,
-        screenHeight: cfg.height,
-        screenOrientation: { type: 'landscapePrimary', angle: 90 }
-      });
+      await session.send('Emulation.clearDeviceMetricsOverride');
       await session.send('Emulation.setTouchEmulationEnabled', { enabled: false }).catch(() => {});
       if (defaultUserAgent) {
         await session.send('Emulation.setUserAgentOverride', {
@@ -87,7 +97,7 @@ async function applyDisplayMode(page) {
           ? defaultUserAgent.replace('(X11; Linux x86_64)', '(Linux; Android 13; Pixel 7)')
           : defaultUserAgent;
         await session.send('Emulation.setUserAgentOverride', {
-          userAgent: mobileUa,
+          userAgent: mobileUa.replace(/(Chrome\/[\d.]+)(?! Mobile)/, '$1 Mobile'),
           platform: 'Android'
         }).catch(() => {});
       }
@@ -98,7 +108,7 @@ async function applyDisplayMode(page) {
 async function applyDisplayModeToAllPages() {
   const context = await getContext();
   const pages = context.pages().filter(p => !p.url().startsWith('chrome-extension://'));
-  await Promise.all(pages.map(page => applyDisplayMode(page).catch(() => {})));
+  await Promise.all(pages.map(page => applyDisplayMode(page)));
 }
 
 const SECRET_RE = /(password|passwd|passcode|otp|one[-_ ]?time|token|secret|pin|2fa|mfa|verification[-_ ]?code|security[-_ ]?code)/i;
@@ -161,20 +171,25 @@ async function summarize(page) {
 }
 
 export async function browserSetMode(args = {}) {
-  const mode = String(args.mode || '').toLowerCase();
-  if (!DISPLAY_MODES[mode]) throw new Error('mode harus desktop atau mobile');
-  displayMode = mode;
-  writeDisplayModeState(mode);
-  await applyDisplayModeToAllPages();
-  const page = await getPage(args.tabIndex);
-  await page.waitForTimeout(250);
-  const viewport = await page.evaluate(() => ({
-    innerWidth: window.innerWidth,
-    innerHeight: window.innerHeight,
-    devicePixelRatio: window.devicePixelRatio,
-    userAgent: navigator.userAgent
-  })).catch(() => null);
-  return { mode: displayMode, target: DISPLAY_MODES[displayMode], viewport, ...(await summarize(page)) };
+  const run = async () => {
+    const mode = String(args.mode || '').toLowerCase();
+    const config = displayConfig(mode, args);
+    const context = await getContext();
+    const pages = context.pages().filter(p => !p.url().startsWith('chrome-extension://'));
+    const visible = await Promise.all(pages.map(async p => await p.evaluate(() => document.visibilityState === 'visible').catch(() => false)));
+    const page = typeof args.tabIndex === 'number' ? pages[args.tabIndex] : pages[visible.indexOf(true)] || pages[0];
+    if (!page) throw new Error('Tab browser tidak tersedia');
+    await syncSharedScreen(page, config);
+    currentDisplay = config;
+    displayMode = mode;
+    writeDisplayModeState(config);
+    await applyDisplayModeToAllPages();
+    const viewport = await page.evaluate(() => ({ innerWidth, innerHeight, devicePixelRatio, userAgent: navigator.userAgent }));
+    return { mode, target: config, viewport, ...(await summarize(page)) };
+  };
+  const pending = modeQueue.then(run, run);
+  modeQueue = pending.catch(() => {});
+  return pending;
 }
 
 export async function browserOpen(args = {}) {

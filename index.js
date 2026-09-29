@@ -1,3 +1,4 @@
+import { LOGIN_TTL_MS, claudeAppDomain } from './browser-embed-security.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -69,12 +70,12 @@ const MCP_VERSION = '3.10.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-card-v4.html';
+const BROWSER_UI_URI = 'ui://attauhid/browser-card-v5.html';
 const BROWSER_UI_URI_RE = /^ui:\/\/attauhid\/(?:browser-v\d+|browser-card-v\d+)\.html$/;
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 function browserViewLink() {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const expires = Date.now() + 600000;
+  const expires = Date.now() + LOGIN_TTL_MS;
   const sig = crypto.createHmac('sha256', APPROVE_PASSWORD).update('browser-view:' + nonce + ':' + expires).digest('hex');
   return BROWSER_VIEW_URL + '?nonce=' + nonce + '&expires=' + expires + '&sig=' + sig;
 }
@@ -1468,6 +1469,8 @@ function createServer(sshDefaultConfig) {
           type: 'object',
           properties: {
             mode: { type: 'string', enum: ['desktop','mobile'], description: 'Mode viewport browser' },
+            width: { type: 'number', minimum: 320, maximum: 640, description: 'Lebar panel mobile (CSS px)' },
+            height: { type: 'number', minimum: 320, maximum: 768, description: 'Tinggi panel mobile (CSS px)' },
             tabIndex: { type: 'number', description: 'Tab tujuan; default tab aktif' }
           },
           required: ['mode']
@@ -2102,6 +2105,7 @@ function createServer(sshDefaultConfig) {
       _meta: {
         'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
         ui: {
+          ...(/claude/i.test(server.getClientVersion()?.name || '') ? { domain: claudeAppDomain(BASE_URL) } : {}),
           prefersBorder: false,
           csp: {
             connectDomains: [],
@@ -2123,6 +2127,7 @@ function createServer(sshDefaultConfig) {
       text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8').replace('__BROWSER_VIEW_URL__', browserViewLink()),
       _meta: {
         ui: {
+          ...(/claude/i.test(server.getClientVersion()?.name || '') ? { domain: claudeAppDomain(BASE_URL) } : {}),
           prefersBorder: false,
           csp: {
             connectDomains: [],

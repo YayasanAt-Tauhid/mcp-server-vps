@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
+import { claudeAppDomain } from './browser-embed-security.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const origin = 'http://127.0.0.1:16081';
@@ -24,12 +25,12 @@ function start(cmd, args, options = {}) {
   return child;
 }
 const auth = start(process.execPath, ['embed-auth.js'], {
-  env: { ...process.env, BROWSER_EMBED_ENV_FILE: envFile, BROWSER_EMBED_AUTH_PORT: '16082', BROWSER_EMBED_ORIGIN: origin }
+  env: { ...process.env, BROWSER_EMBED_ENV_FILE: envFile, BROWSER_EMBED_AUTH_PORT: '16082', BROWSER_EMBED_ORIGIN: origin, BROWSER_LOGIN_NONCE_FILE: join(temp, 'nonces.json') }
 });
 let config = await readFile(join(root, 'attauhid-browser.nginx.conf'), 'utf8');
 config = config.replaceAll('127.0.0.1:6081', '127.0.0.1:16081')
   .replaceAll('127.0.0.1:6082', '127.0.0.1:16082')
-  .replace('/var/log/nginx/attauhid-browser-ws.log', join(temp, 'ws.log'));
+  .replaceAll('/var/log/nginx/attauhid-browser-ws.log', join(temp, 'ws.log'));
 await writeFile(join(temp, 'nginx.conf'), 'pid ' + join(temp, 'nginx.pid') + ';\nerror_log ' + join(temp, 'error.log') + ';\nevents {}\nhttp {\n'
   + 'access_log ' + join(temp, 'access.log') + ';\nclient_body_temp_path ' + join(temp, 'body') + ';\nproxy_temp_path ' + join(temp, 'proxy') + ';\n'
   + config + '\n}\n');
@@ -79,6 +80,12 @@ try {
   const sig = crypto.createHmac('sha256', password).update('browser-view:' + nonce + ':' + expires).digest('hex');
   const login = await req('/embed/login?' + new URLSearchParams({ nonce, expires: String(expires), sig }));
   assert.equal(login.status, 303);
+  assert.match(login.headers.get('content-security-policy'), /frame-ancestors.*https:\/\/claude\.ai/);
+  assert.equal(login.headers.get('x-frame-options'),null);
+  const replay=await req('/embed/login?' + new URLSearchParams({nonce,expires:String(expires),sig}));
+  assert.equal(replay.status,200);
+  assert.equal(replay.headers.get('set-cookie'),null);
+  check('restricted CSP and one-use login prevent a second session from the same URL');
   const cookie = login.headers.get('set-cookie').split(';')[0];
   const headers = { Cookie: cookie, Origin: origin };
   assert.equal((await req('/embed/view', { headers })).status, 200);
@@ -115,6 +122,8 @@ try {
   await page.waitForFunction(() => document.querySelector('#status').textContent === 'Terhubung', null, { timeout: 20000 });
   const vnc = page.frames().find(frame => frame.url().includes('/embed/vnc.html'));
   assert.ok(vnc);
+  await vnc.waitForFunction(()=>document.querySelector('#noVNC_container canvas')?.width===390);
+  check('mobile viewer receives a portrait framebuffer instead of a scaled desktop');
   await vnc.waitForFunction(() => document.documentElement.classList.contains('noVNC_connected'));
   assert.deepEqual(errors, []);
   check('mobile-sized viewer reaches real noVNC connected state without script errors');
@@ -142,6 +151,24 @@ try {
   }, null, { timeout: 10000 });
   await page.screenshot({ path: join(temp, 'embedded-viewer.png') });
   check('embedded viewer hides duplicate toolbar and reports actual connection state to its parent');
+  const violations=[];
+  const framedOrigin='https://browser-vps.hijrah-attauhid.or.id';
+  await page.route(framedOrigin+'/test-frame', async route=>{
+    const response=await req('/embed/login');
+    return route.fulfill({status:200,headers:Object.fromEntries(response.headers),body:await response.text()});
+  });
+  page.on('console', message=>{if(message.text().includes('frame-ancestors')) violations.push(message.text())});
+  await page.route('https://unrelated.example/**', route=>route.fulfill({contentType:'text/html',body:'<iframe src="'+framedOrigin+'/test-frame"></iframe>'}));
+  await page.goto('https://unrelated.example/');
+  await page.waitForTimeout(300);
+  assert.ok(violations.length>0,'unapproved parent must be blocked by CSP');
+  check('unapproved embedding origin is blocked by the browser');
+  const claudeSandbox='https://'+claudeAppDomain('https://mcp-vps2.hijrah-attauhid.or.id');
+  await page.route('https://claude.ai/**', route=>route.fulfill({contentType:'text/html',body:'<iframe src="'+claudeSandbox+'/app"></iframe>'}));
+  await page.route(claudeSandbox+'/**', route=>route.fulfill({contentType:'text/html',body:'<iframe src="'+framedOrigin+'/test-frame"></iframe>'}));
+  await page.goto('https://claude.ai/test-host');
+  await page.frameLocator('iframe').frameLocator('iframe').locator('input[type=password]').waitFor({state:'visible'});
+  check('Claude plus its specific nested MCP sandbox are allowed by frame-ancestors');
   console.log(JSON.stringify({ checks, screenshot: join(temp, 'embedded-viewer.png'), isolatedOrigin: origin }));
 } catch (error) {
   console.error(error.name + ': ' + error.message.replace(/ticket=[a-f0-9]+/g, 'ticket=[redacted]'));

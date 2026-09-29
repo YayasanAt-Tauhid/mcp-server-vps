@@ -16,19 +16,19 @@ body{overflow:hidden;display:flex;flex-direction:column;height:var(--panel-heigh
 .controls button.active{background:#eaf1ff;color:#182133;border-color:#eaf1ff}
 .controls button:disabled{opacity:.45}
 .controls button[hidden]{display:none}
-.bar a{display:none;color:#b9d4ff}
+.bar a{display:inline-flex;color:#b9d4ff}
 .wrap{position:relative;flex:1;min-height:0;background:#0e1219;display:flex;justify-content:center}
 .viewport{position:relative;width:100%;height:100%;transition:max-width .18s ease}
-.mobile-mode .viewport{max-width:430px;box-shadow:0 0 0 1px #354057}
+.mobile-mode .viewport{max-width:640px;box-shadow:0 0 0 1px #354057}
 iframe{display:none;width:100%;height:100%;border:0;background:#111}
-.loading{position:absolute;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:#d8e2f0}
+.loading{z-index:2;background:#151a23;position:absolute;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:#d8e2f0}
 @media (max-width:640px){
-  .bar{flex-wrap:wrap}
-  .brand{width:100%;text-align:center}
-  .status{order:3;width:100%;flex-basis:100%}
-  .controls{margin:auto}
-  .controls button{padding:6px 8px;font-size:12px}
-  .bar a{margin:auto;font-size:12px}
+  .bar{display:grid;grid-template-columns:1fr auto;gap:6px;padding:8px}
+  .brand{grid-area:1/1;font-size:13px;min-width:0}
+  .status{grid-area:1/2;text-align:right;font-size:11px;max-width:105px}
+  .controls{grid-area:2/1;gap:4px}
+  .controls button{min-height:38px;padding:6px;font-size:12px}
+  .bar a{grid-area:2/2;justify-content:center;align-items:center;min-height:26px;padding:6px;font-size:12px}
 }
 </style>
 </head>
@@ -43,12 +43,12 @@ iframe{display:none;width:100%;height:100%;border:0;background:#111}
       <button id="mode-fullscreen" type="button" disabled title="Layar penuh" aria-pressed="false">⛶ Fullscreen</button>
     </div>
     <span id="status" class="status" role="status">Menyiapkan MCP App…</span>
-    <a id="external" target="_blank" rel="noopener noreferrer">Buka layar terpisah</a>
+    <a id="external" href="https://browser-vps.hijrah-attauhid.or.id/embed/login" target="_blank" rel="noopener noreferrer" title="Buka layar terpisah">Buka tab ↗</a>
   </div>
 </div>
 <div class="wrap">
   <div class="viewport">
-    <div id="loading" class="loading">Menghubungkan panel browser ke ChatGPT…</div>
+    <div id="loading" class="loading">Menghubungkan panel browser…</div>
     <iframe id="browser" title="Browser bersama VPS At-Tauhid" allow="fullscreen"></iframe>
   </div>
 </div>

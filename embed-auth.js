@@ -1,18 +1,20 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import {readFileSync} from 'node:fs';
-import {browserSetMode, browserCurrentMode} from './browser-tools.js';
+import {browserSetMode, browserCurrentMode, browserCurrentDisplay} from './browser-tools.js';
 import {createWebSocketTickets} from './browser-websocket-auth.js';
+import {createLoginTickets, embedAncestors} from './browser-embed-security.js';
 
 const env=readFileSync(process.env.BROWSER_EMBED_ENV_FILE || new URL('.env',import.meta.url),'utf8');
 const browserOrigin=process.env.BROWSER_EMBED_ORIGIN || 'https://browser-vps.hijrah-attauhid.or.id';
-const browserViewer=readFileSync(new URL('browser-viewer.html',import.meta.url),'utf8');
+const ancestors=embedAncestors(process.env.BASE_URL, process.env.BROWSER_EMBED_ANCESTORS || '');
+const browserViewer=readFileSync(new URL('browser-viewer.html',import.meta.url),'utf8').replace('/*__ALLOWED_PARENTS__*/[]',JSON.stringify(ancestors));
 const password=env.split('\n').find(x=>x.startsWith('APPROVE_PASSWORD='))?.slice(17).trim();
 if(!password) throw Error('Missing approval password');
 
 const sessions=new Map(), attempts=new Map();
 const websocketTickets=createWebSocketTickets({sessions,origin:browserOrigin});
-const signed=(nonce,expires)=>crypto.createHmac('sha256',password).update('browser-view:'+nonce+':'+expires).digest('hex');
+const loginTickets=createLoginTickets({key:password,stateFile:process.env.BROWSER_LOGIN_NONCE_FILE || '/tmp/attauhid-browser-login-nonces.json'});
 
 const loginPage=(res,status=200,bad=false)=>{
   res.writeHead(status,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});
@@ -64,6 +66,9 @@ function readBody(req,limit=4096){
 
 http.createServer(async(req,res)=>{
   try{
+    res.setHeader('Content-Security-Policy', 'frame-ancestors ' + ancestors.join(' '));
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
     const ip=String(req.headers['cf-connecting-ip']||req.socket.remoteAddress);
     const url=new URL(req.url||'/', browserOrigin);
 
@@ -104,7 +109,7 @@ http.createServer(async(req,res)=>{
 
     if(url.pathname==='/mode'){
       if(!valid(req)) return json(res,401,{error:'unauthorized'});
-      if(req.method==='GET') return json(res,200,{mode:browserCurrentMode()});
+      if(req.method==='GET') return json(res,200,browserCurrentDisplay());
       if(req.method!=='POST'){
         res.writeHead(405,{'Allow':'GET, POST'});
         return res.end();
@@ -113,14 +118,15 @@ http.createServer(async(req,res)=>{
         return json(res,403,{error:'origin'});
       }
       const raw=await readBody(req,1024);
-      let mode='';
+      let mode='', dimensions={};
       try{
         const type=String(req.headers['content-type']||'');
-        mode=type.includes('application/json')?JSON.parse(raw).mode:new URLSearchParams(raw).get('mode');
+        dimensions=type.includes('application/json')?JSON.parse(raw):Object.fromEntries(new URLSearchParams(raw));
+        mode=dimensions.mode;
       }catch{}
       if(!['desktop','mobile'].includes(mode)) return json(res,400,{error:'invalid_mode'});
-      const result=await browserSetMode({mode});
-      return json(res,200,{mode:result.mode,viewport:result.viewport});
+      const result=await browserSetMode({mode,width:dimensions.width,height:dimensions.height});
+      return json(res,200,{mode:result.mode,width:result.target.width,height:result.target.height,viewport:result.viewport});
     }
 
     if(url.pathname!=='/embed/login' && url.pathname!=='/login'){
@@ -134,10 +140,7 @@ http.createServer(async(req,res)=>{
         return res.end();
       }
       const nonce=url.searchParams.get('nonce')||'', expires=Number(url.searchParams.get('expires')), sig=url.searchParams.get('sig')||'';
-      if(/^[a-f0-9]{32}$/.test(nonce) && Number.isSafeInteger(expires) && expires>Date.now() && expires<Date.now()+660000 && /^[a-f0-9]{64}$/.test(sig)){
-        const expected=signed(nonce,expires);
-        if(crypto.timingSafeEqual(Buffer.from(sig,'hex'),Buffer.from(expected,'hex'))) return grant(res);
-      }
+      if(loginTickets.consume(nonce,expires,sig)) return grant(res);
       return loginPage(res);
     }
 
