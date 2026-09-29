@@ -1,4 +1,5 @@
 import { chromium } from 'playwright-core';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 const CDP_URL = process.env.BROWSER_CDP_URL || 'http://127.0.0.1:9222';
 let browserClient = null;
@@ -6,11 +7,30 @@ let activePage = null;
 let displayMode = 'desktop';
 let defaultUserAgent = null;
 const cdpSessions = new WeakMap();
+const DISPLAY_MODE_STATE_FILE = process.env.BROWSER_DISPLAY_MODE_STATE_FILE || '/tmp/attauhid-browser-display-mode';
 
 const DISPLAY_MODES = {
   desktop: { width: 1366, height: 768, mobile: false, touch: false },
   mobile: { width: 390, height: 844, mobile: true, touch: true }
 };
+
+function readDisplayModeState() {
+  try {
+    const mode = readFileSync(DISPLAY_MODE_STATE_FILE, 'utf8').trim();
+    return DISPLAY_MODES[mode] ? mode : displayMode;
+  } catch {
+    return displayMode;
+  }
+}
+
+function writeDisplayModeState(mode) {
+  writeFileSync(DISPLAY_MODE_STATE_FILE, mode + '\n', { mode: 0o600 });
+}
+
+export function browserCurrentMode() {
+  displayMode = readDisplayModeState();
+  return displayMode;
+}
 
 async function getCdpSession(page) {
   let session = cdpSessions.get(page);
@@ -26,6 +46,7 @@ async function getCdpSession(page) {
 }
 
 async function applyDisplayMode(page) {
+  displayMode = readDisplayModeState();
   const cfg = DISPLAY_MODES[displayMode] || DISPLAY_MODES.desktop;
   const session = await getCdpSession(page);
   {
@@ -143,6 +164,7 @@ export async function browserSetMode(args = {}) {
   const mode = String(args.mode || '').toLowerCase();
   if (!DISPLAY_MODES[mode]) throw new Error('mode harus desktop atau mobile');
   displayMode = mode;
+  writeDisplayModeState(mode);
   await applyDisplayModeToAllPages();
   const page = await getPage(args.tabIndex);
   await page.waitForTimeout(250);

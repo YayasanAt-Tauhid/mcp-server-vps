@@ -51,3 +51,29 @@ Existing chats may retain a cached tool schema. Refresh the connector or begin a
 A service restart clears in-memory MCP/SSH sessions and unused upload slots; reconnect when needed. Persistent browser profile, project registry and checkpoints survive.
 
 Rollback to the pre-upgrade Git commit ad3f8dc via a reviewed revert/worktree; do not reset over unrelated working changes. Restart mcp-vps2.service after restoring the code. Browser sandbox assets may remain safely installed.
+
+## Browser viewer routing (2026-09-29)
+
+The browser login now redirects to `/embed/view`, and the standalone toolbar uses
+`/embed/mode`. Both routes must proxy to the embed-auth service on port 6082.
+Sending them to noVNC on port 6080 produces a Python `404 File not found` page.
+The tracked `attauhid-browser.nginx.conf` is the complete configuration for this
+server; keep these exact-match routes ahead of the generic `/embed/` proxy.
+
+To deploy a reviewed configuration, back up the current file outside
+`sites-enabled`, install this file as `/etc/nginx/sites-enabled/attauhid-browser`,
+run `sudo nginx -t`, then `sudo systemctl reload nginx`. Restore the backup if
+validation fails. Reloading Nginx preserves the browser and MCP sessions.
+
+Verification: unauthenticated `/embed/view` redirects to `/embed/login`,
+`/embed/mode` returns 401 JSON, and protected noVNC resources require the existing
+session. The noVNC origin returns 200 and reaches the connected framebuffer state.
+Both mobile (390x844) and desktop (1366x768) browser modes were exercised.
+The public automated HTTP probe returned Cloudflare 1010; it did not validate a
+signed-in ChatGPT panel. Reopen browser_view to verify the client display.
+
+This snapshot also preserves the live browser-mode state sharing, standalone
+viewer controls, rebuilt MCP UI, and literal-safe bundle replacement from the
+previous browser update. As verified from remote heads, the deployment branch
+is now `attauhid` (renamed from `feat/attauhid-safara-parity`); Safara is `main`.
+Do not merge the Safara `origin/main` into this VPS.
