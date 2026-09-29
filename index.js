@@ -69,7 +69,7 @@ const MCP_VERSION = '3.10.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-card-v2.html';
+const BROWSER_UI_URI = 'ui://attauhid/browser-card-v3.html';
 const BROWSER_UI_URI_RE = /^ui:\/\/attauhid\/(?:browser-v\d+|browser-card-v\d+)\.html$/;
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 function browserViewLink() {

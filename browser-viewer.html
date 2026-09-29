@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Browser VPS At-Tauhid</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#111827;color:#f8fafc;font:14px system-ui,sans-serif;overflow:hidden}
+body{display:flex;flex-direction:column}
+.toolbar{min-height:52px;display:flex;align-items:center;gap:8px;padding:7px 10px;background:#1f2937;border-bottom:1px solid #374151}
+.brand{font-weight:700;white-space:nowrap}
+.spacer{flex:1}
+.status{font-size:12px;opacity:.85}
+button{border:1px solid #4b5563;background:#273449;color:#f8fafc;border-radius:9px;padding:7px 10px;font:inherit;cursor:pointer}
+button.active{background:#e2e8f0;color:#0f172a}
+button:disabled{opacity:.5;cursor:wait}
+.stage{flex:1;min-height:0;display:flex;justify-content:center;background:#0b1020;position:relative}
+.frame-wrap{width:100%;height:100%}
+.stage.mobile .frame-wrap{max-width:430px}
+iframe{display:block;width:100%;height:100%;border:0;background:#0f172a}
+.notice{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;background:#111827}
+.notice[hidden],button[hidden]{display:none}
+body.embedded .toolbar{display:none}
+@media(max-width:700px){.brand{display:none}.toolbar{gap:5px;padding:6px;flex-wrap:wrap}.status{flex-basis:100%;order:2;text-align:center}button{padding:7px 8px;font-size:12px}}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <span class="brand">Browser VPS At-Tauhid</span>
+  <button id="desktop" type="button">🖥 Desktop</button>
+  <button id="mobile" type="button">📱 Mobile</button>
+  <span class="spacer"></span>
+  <span id="status" class="status" role="status">Menghubungkan layar…</span>
+  <button id="retry" type="button" hidden>Sambung ulang</button>
+  <button id="fullscreen" type="button">⛶ Fullscreen</button>
+</div>
+<div id="stage" class="stage">
+  <div class="frame-wrap"><iframe id="vnc" title="Layar browser VPS" allow="fullscreen"></iframe></div>
+  <div id="notice" class="notice">Menghubungkan layar browser…</div>
+</div>
+<script>
+const desktop=document.getElementById('desktop');
+const mobile=document.getElementById('mobile');
+const fullscreen=document.getElementById('fullscreen');
+const retry=document.getElementById('retry');
+const stage=document.getElementById('stage');
+const status=document.getElementById('status');
+const notice=document.getElementById('notice');
+const vnc=document.getElementById('vnc');
+const isEmbedded=window.parent!==window;
+document.body.classList.toggle('embedded',isEmbedded);
+let currentMode='desktop', state='connecting', observer, timeout, retryTimer;
+let attempts=0, generation=0, lastState='', manualDisconnect=false, loaded=false;
+
+function notifyParent(){
+  if(isEmbedded) window.parent.postMessage({type:'attauhid-browser-state',state,mode:currentMode},'*');
+}
+function setState(value){
+  state=value;
+  const labels={connecting:'Menghubungkan layar…',connected:'Terhubung',disconnected:'Koneksi terputus',error:'Gagal terhubung',auth:'Sesi berakhir — buka ulang panel'};
+  status.textContent=labels[value]||labels.connecting;
+  retry.hidden=!['error','disconnected'].includes(value);
+  notifyParent();
+}
+function paint(mode){
+  currentMode=mode==='mobile'?'mobile':'desktop';
+  desktop.classList.toggle('active',currentMode==='desktop');
+  mobile.classList.toggle('active',currentMode==='mobile');
+  stage.classList.toggle('mobile',currentMode==='mobile');
+  notifyParent();
+}
+async function refreshMode(){
+  try{
+    const r=await fetch('/embed/mode',{cache:'no-store'});
+    if(r.ok) paint((await r.json()).mode);
+  }catch{}
+}
+async function change(mode){
+  desktop.disabled=true;mobile.disabled=true;
+  try{
+    const r=await fetch('/embed/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    if(!r.ok) throw Error('mode');
+    paint((await r.json()).mode);
+  }catch{status.textContent='Gagal mengubah mode'}
+  finally{desktop.disabled=false;mobile.disabled=false}
+}
+function retryAfterFailure(){
+  if(manualDisconnect||attempts>=2||retryTimer) return;
+  attempts++;
+  retryTimer=setTimeout(()=>{retryTimer=null;connect();},attempts*1500);
+}
+function observeVnc(){
+  const doc=vnc.contentDocument;
+  if(!doc?.getElementById('noVNC_container')){
+    setState('auth');notice.hidden=false;notice.textContent='Sesi berakhir. Buka ulang panel browser.';
+    return;
+  }
+  loaded=true;
+  notice.hidden=true;
+  let hadConnection=false;
+  function update(){
+    const root=doc.documentElement;
+    const error=doc.getElementById('noVNC_status')?.classList.contains('noVNC_status_error');
+    const next=root.classList.contains('noVNC_connected')?'connected':
+      root.classList.contains('noVNC_connecting')||root.classList.contains('noVNC_reconnecting')?'connecting':
+      error?'error':hadConnection?'disconnected':'connecting';
+    if(next===lastState) return;
+    lastState=next;
+    if(next==='connected'){hadConnection=true;clearTimeout(timeout)}
+    setState(next);
+    if(next==='error'||(next==='disconnected'&&!manualDisconnect)){
+      clearTimeout(timeout);retryAfterFailure();
+    }
+  }
+  observer=new MutationObserver(update);
+  observer.observe(doc.documentElement,{attributes:true,subtree:true,childList:true,characterData:true});
+  doc.addEventListener('click',event=>{
+    if(event.target.closest('#noVNC_connect_button')){
+      event.preventDefault();event.stopImmediatePropagation();attempts=0;connect();
+    }else if(event.target.closest('#noVNC_disconnect_button')){
+      manualDisconnect=true;clearTimeout(retryTimer);retryTimer=null;
+    }
+  },true);
+  update();
+}
+async function connect(){
+  const id=++generation;
+  clearTimeout(timeout);clearTimeout(retryTimer);retryTimer=null;
+  observer?.disconnect();
+  lastState='';manualDisconnect=false;loaded=false;
+  setState('connecting');
+  notice.hidden=false;notice.textContent='Menghubungkan layar browser…';
+  try{
+    const response=await fetch('/embed/connection',{method:'POST',cache:'no-store'});
+    if(id!==generation) return;
+    if(response.status===401){
+      setState('auth');notice.textContent='Sesi berakhir. Buka ulang panel browser.';return;
+    }
+    if(!response.ok) throw Error('connection');
+    const result=await response.json();
+    if(!/^embed\/websockify\?ticket=[a-f0-9]{64}$/.test(result.path)) throw Error('path');
+    const url=new URL('/embed/vnc.html',location.origin);
+    url.searchParams.set('attempt',String(id));
+    url.hash=new URLSearchParams({path:result.path,autoconnect:'1',resize:'scale',reconnect:'0',
+      host:location.hostname,port:location.port,encrypt:location.protocol==='https:'?'1':'0'}).toString();
+    vnc.onload=()=>{if(id===generation) observeVnc()};
+    vnc.src=url.href;
+    timeout=setTimeout(()=>{
+      if(id===generation&&state==='connecting'){
+        setState('error');
+        if(!loaded){notice.hidden=false;notice.textContent='Layar belum tersambung.'}
+        retryAfterFailure();
+      }
+    },15000);
+  }catch{
+    if(id!==generation) return;
+    setState('error');notice.textContent='Layar belum tersambung.';retryAfterFailure();
+  }
+}
+window.addEventListener('message',event=>{
+  if(event.source!==window.parent||!isEmbedded) return;
+  if(!/^https:\/\/[a-z0-9_-]+\.web-sandbox\.oaiusercontent\.com$/.test(event.origin)&&
+     !['https://chatgpt.com','https://chat.openai.com'].includes(event.origin)) return;
+  if(event.data?.type==='attauhid-browser-retry'){attempts=0;connect()}
+  if(event.data?.type==='attauhid-browser-mode-refresh') refreshMode();
+});
+desktop.addEventListener('click',()=>change('desktop'));
+mobile.addEventListener('click',()=>change('mobile'));
+retry.addEventListener('click',()=>{attempts=0;connect()});
+fullscreen.addEventListener('click',async()=>{
+  try{
+    if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+    else await document.exitFullscreen();
+  }catch{status.textContent='Fullscreen tidak tersedia'}
+});
+refreshMode();
+connect();
+</script>
+</body>
+</html>

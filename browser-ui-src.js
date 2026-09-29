@@ -8,6 +8,9 @@ const external = document.getElementById('external');
 const desktopBtn = document.getElementById('mode-desktop');
 const mobileBtn = document.getElementById('mode-mobile');
 const fullscreenBtn = document.getElementById('mode-fullscreen');
+const retryBtn = document.getElementById('mode-retry');
+let viewState = 'connecting';
+let viewTimeout;
 
 let opened = false;
 let connected = false;
@@ -49,12 +52,42 @@ function openView(value) {
   opened = true;
   external.href = url;
   external.style.display = 'inline';
-  status.textContent = 'Terhubung';
+  status.textContent = 'Menghubungkan layar…';
+  viewTimeout = setTimeout(() => {
+    if (viewState !== 'connected') status.textContent = 'Layar belum tersambung — buka ulang panel jika sesi berakhir';
+  }, 20000);
   loading.style.display = 'none';
   frame.style.display = 'block';
   frame.src = url;
   return true;
 }
+
+function showViewState() {
+  const labels = {
+    connecting: 'Menghubungkan layar…',
+    connected: 'Terhubung',
+    disconnected: 'Koneksi terputus',
+    error: 'Gagal terhubung',
+    auth: 'Sesi berakhir — buka ulang panel'
+  };
+  status.textContent = labels[viewState] || labels.connecting;
+  retryBtn.hidden = !['error', 'disconnected'].includes(viewState);
+}
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== ORIGIN || event.source !== frame.contentWindow) return;
+  const data = event.data;
+  if (data?.type !== 'attauhid-browser-state' ||
+      !['connecting', 'connected', 'disconnected', 'error', 'auth'].includes(data.state)) return;
+  viewState = data.state;
+  clearTimeout(viewTimeout);
+  if (['desktop', 'mobile'].includes(data.mode)) setModeUi(data.mode);
+  showViewState();
+});
+
+retryBtn.addEventListener('click', () => {
+  frame.contentWindow?.postMessage({ type: 'attauhid-browser-retry' }, ORIGIN);
+});
 
 function openFromCompatibilityBridge() {
   try {
@@ -67,7 +100,7 @@ function openFromCompatibilityBridge() {
   }
 }
 
-const app = new App({ name: 'Browser VPS At-Tauhid', version: '7.0.0' });
+const app = new App({ name: 'Browser VPS At-Tauhid', version: '7.1.0' });
 
 app.ontoolresult = (result) => {
   const url = extractUrl(result);
@@ -95,7 +128,8 @@ async function setBrowserMode(mode) {
       arguments: { mode }
     });
     if (result?.isError) throw new Error('browser_set_mode gagal');
-    status.textContent = mode === 'mobile' ? 'Mobile · 390×844' : 'Desktop · 1366×768';
+    frame.contentWindow?.postMessage({ type: 'attauhid-browser-mode-refresh' }, ORIGIN);
+    showViewState();
   } catch (error) {
     console.error('Failed to switch browser mode', error);
     setModeUi(previous);

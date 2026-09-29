@@ -2,12 +2,16 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {browserSetMode, browserCurrentMode} from './browser-tools.js';
+import {createWebSocketTickets} from './browser-websocket-auth.js';
 
-const env=readFileSync(new URL('.env',import.meta.url),'utf8');
+const env=readFileSync(process.env.BROWSER_EMBED_ENV_FILE || new URL('.env',import.meta.url),'utf8');
+const browserOrigin=process.env.BROWSER_EMBED_ORIGIN || 'https://browser-vps.hijrah-attauhid.or.id';
+const browserViewer=readFileSync(new URL('browser-viewer.html',import.meta.url),'utf8');
 const password=env.split('\n').find(x=>x.startsWith('APPROVE_PASSWORD='))?.slice(17).trim();
 if(!password) throw Error('Missing approval password');
 
 const sessions=new Map(), attempts=new Map();
+const websocketTickets=createWebSocketTickets({sessions,origin:browserOrigin});
 const signed=(nonce,expires)=>crypto.createHmac('sha256',password).update('browser-view:'+nonce+':'+expires).digest('hex');
 
 const loginPage=(res,status=200,bad=false)=>{
@@ -17,106 +21,15 @@ const loginPage=(res,status=200,bad=false)=>{
 
 const browserPage=(res)=>{
   res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'});
-  res.end(`<!doctype html>
-<html lang="id">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Browser VPS At-Tauhid</title>
-<style>
-*{box-sizing:border-box}
-html,body{margin:0;height:100%;background:#111827;color:#f8fafc;font:14px system-ui,sans-serif;overflow:hidden}
-.toolbar{height:52px;display:flex;align-items:center;gap:8px;padding:7px 10px;background:#1f2937;border-bottom:1px solid #374151}
-.brand{font-weight:700;white-space:nowrap;margin-right:4px}
-.spacer{flex:1}
-.status{font-size:12px;opacity:.8;white-space:nowrap}
-button{border:1px solid #4b5563;background:#273449;color:#f8fafc;border-radius:9px;padding:7px 10px;font:inherit;cursor:pointer}
-button:hover{background:#334155}
-button.active{background:#e2e8f0;color:#0f172a;border-color:#e2e8f0}
-button:disabled{opacity:.5;cursor:wait}
-.stage{height:calc(100% - 52px);display:flex;justify-content:center;background:#0b1020}
-.frame-wrap{width:100%;height:100%;transition:max-width .2s ease,width .2s ease}
-.stage.mobile .frame-wrap{max-width:430px}
-iframe{display:block;width:100%;height:100%;border:0;background:#0f172a}
-@media(max-width:700px){
- .brand{display:none}
- .toolbar{gap:5px;padding:6px}
- .status{display:none}
- button{padding:7px 8px;font-size:12px}
-}
-</style>
-</head>
-<body>
-<div class="toolbar">
-  <span class="brand">Browser VPS At-Tauhid</span>
-  <button id="desktop" type="button">🖥 Desktop</button>
-  <button id="mobile" type="button">📱 Mobile</button>
-  <span class="spacer"></span>
-  <span id="status" class="status">Memuat mode…</span>
-  <button id="fullscreen" type="button" title="Fullscreen">⛶ Fullscreen</button>
-</div>
-<div id="stage" class="stage">
-  <div class="frame-wrap">
-    <iframe id="vnc" src="/embed/vnc.html?path=embed/websockify&autoconnect=1&resize=scale" allow="fullscreen"></iframe>
-  </div>
-</div>
-<script>
-const desktop=document.getElementById('desktop');
-const mobile=document.getElementById('mobile');
-const fullscreen=document.getElementById('fullscreen');
-const stage=document.getElementById('stage');
-const status=document.getElementById('status');
-
-function paint(mode){
-  desktop.classList.toggle('active',mode==='desktop');
-  mobile.classList.toggle('active',mode==='mobile');
-  stage.classList.toggle('mobile',mode==='mobile');
-  status.textContent=mode==='mobile'?'Mobile · 390×844':'Desktop · 1366×768';
-}
-async function refresh(){
-  try{
-    const r=await fetch('/embed/mode',{cache:'no-store'});
-    const j=await r.json();
-    paint(j.mode||'desktop');
-  }catch{paint('desktop')}
-}
-async function change(mode){
-  desktop.disabled=true; mobile.disabled=true;
-  status.textContent=mode==='mobile'?'Mengaktifkan mobile…':'Mengaktifkan desktop…';
-  try{
-    const r=await fetch('/embed/mode',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mode})
-    });
-    if(!r.ok) throw new Error('Mode gagal');
-    const j=await r.json();
-    paint(j.mode||mode);
-  }catch(e){
-    status.textContent='Gagal mengubah mode';
-  }finally{
-    desktop.disabled=false; mobile.disabled=false;
-  }
-}
-desktop.addEventListener('click',()=>change('desktop'));
-mobile.addEventListener('click',()=>change('mobile'));
-fullscreen.addEventListener('click',async()=>{
-  try{
-    if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
-    else await document.exitFullscreen();
-  }catch{}
-});
-document.addEventListener('fullscreenchange',()=>{
-  fullscreen.textContent=document.fullscreenElement?'⛶ Keluar':'⛶ Fullscreen';
-});
-refresh();
-</script>
-</body>
-</html>`);
+  res.end(browserViewer);
 };
 
+function sessionToken(req){
+  return /(?:^|;\s*)at_browser=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1];
+}
+
 function valid(req){
-  const token=/(?:^|;\s*)at_browser=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie||'')?.[1];
+  const token=sessionToken(req);
   return !!token && (sessions.get(token)||0)>Date.now();
 }
 
@@ -152,11 +65,33 @@ function readBody(req,limit=4096){
 http.createServer(async(req,res)=>{
   try{
     const ip=String(req.headers['cf-connecting-ip']||req.socket.remoteAddress);
-    const url=new URL(req.url||'/', 'https://browser-vps.hijrah-attauhid.or.id');
+    const url=new URL(req.url||'/', browserOrigin);
 
     if(url.pathname==='/auth'){
       res.writeHead(valid(req)?204:401,{'Cache-Control':'no-store'});
       return res.end();
+    }
+
+    if(url.pathname==='/auth/ws'){
+      const original=new URL(String(req.headers['x-browser-request-uri']||'/'),browserOrigin);
+      const ticket=original.searchParams.get('ticket');
+      const allowed=original.pathname==='/embed/websockify'
+        && req.headers['x-browser-upgrade']==='websocket'
+        && req.headers.origin===browserOrigin
+        && (ticket ? websocketTickets.consume(ticket,req.headers.origin) : valid(req));
+      res.writeHead(allowed?204:401,{'Cache-Control':'no-store'});
+      return res.end();
+    }
+
+    if(url.pathname==='/connection'){
+      if(!valid(req)) return json(res,401,{error:'unauthorized'});
+      if(req.method!=='POST'){
+        res.writeHead(405,{'Allow':'POST','Cache-Control':'no-store'});
+        return res.end();
+      }
+      if(req.headers.origin!==browserOrigin) return json(res,403,{error:'origin'});
+      const {ticket,expiresAt}=websocketTickets.issue(sessionToken(req));
+      return json(res,200,{path:'embed/websockify?ticket='+ticket,expiresAt});
     }
 
     if(url.pathname==='/view'){
@@ -174,7 +109,7 @@ http.createServer(async(req,res)=>{
         res.writeHead(405,{'Allow':'GET, POST'});
         return res.end();
       }
-      if(req.headers.origin && req.headers.origin!=='https://browser-vps.hijrah-attauhid.or.id'){
+      if(req.headers.origin && req.headers.origin!==browserOrigin){
         return json(res,403,{error:'origin'});
       }
       const raw=await readBody(req,1024);
@@ -211,7 +146,7 @@ http.createServer(async(req,res)=>{
       return res.end();
     }
 
-    if(req.headers.origin && req.headers.origin!=='https://browser-vps.hijrah-attauhid.or.id'){
+    if(req.headers.origin && req.headers.origin!==browserOrigin){
       res.writeHead(403);
       return res.end();
     }
@@ -233,4 +168,4 @@ http.createServer(async(req,res)=>{
     if(!res.headersSent) json(res,500,{error:'internal_error'});
     else res.end();
   }
-}).listen(6082,'127.0.0.1');
+}).listen(Number(process.env.BROWSER_EMBED_AUTH_PORT || 6082),'127.0.0.1');

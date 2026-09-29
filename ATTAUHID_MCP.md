@@ -77,3 +77,44 @@ viewer controls, rebuilt MCP UI, and literal-safe bundle replacement from the
 previous browser update. As verified from remote heads, the deployment branch
 is now `attauhid` (renamed from `feat/attauhid-safara-parity`); Safara is `main`.
 Do not merge the Safara `origin/main` into this VPS.
+
+## Android embedded WebSocket repair (2026-09-29)
+
+Observed Android WebView requests loaded /embed/view, noVNC assets, and
+/embed/mode successfully, while /embed/websockify repeatedly returned 302
+from the cookie-only authentication gate. The outer MCP card also displayed
+"Terhubung" as soon as it assigned the iframe URL, before any VNC handshake.
+
+The authenticated POST /embed/connection now issues an origin-bound, single-use
+WebSocket ticket with a maximum lifetime of 60 seconds and no lifetime beyond its
+browser session. Only the exact /embed/websockify upgrade endpoint accepts it.
+The existing cookie-only WebSocket flow remains supported with origin validation.
+Anonymous traffic, wrong origins, replayed/expired tickets, and other resource
+paths remain protected. Login, CSP, cookie attributes, and browser profile are
+unchanged. Tickets are carried in the noVNC URL fragment, omitted from WebSocket
+access logs, and stripped before forwarding to websockify.
+
+browser-viewer.html retains the full noVNC controls, requests a fresh ticket for
+each connection, and reports actual noVNC connection state to the MCP card.
+Embedded mode hides the duplicate standalone toolbar. Two bounded automatic
+retries and a manual "Sambung ulang" action handle dropped connections.
+MCP resource browser-card-v3.html includes the matching state listener.
+
+Validation:
+- 52 unit tests passed (npm test), including five ticket security/lifecycle tests.
+- Eight isolated integration checks passed (node browser-viewer.integration.mjs):
+  protected routes; authenticated ticket issuance; cookie-free WebSocket reaching
+  the actual RFB banner; wrong-origin/replay denial; cookie compatibility; protected
+  assets and redacted WS access logs; mobile-sized noVNC connection and reconnect;
+  embedded toolbar/state messages and a populated framebuffer.
+- The integration script uses temporary Nginx/auth sidecars on 16081/16082 and the
+  existing live framebuffer. It reads the configured signing key without printing
+  it and leaves the shared browser tabs/profile untouched.
+- End-to-end display inside the user's ChatGPT Android app still requires reopening
+  browser_view; an origin-only test cannot certify that specific client.
+
+Deployment requires the new viewer and ticket module alongside embed-auth.js,
+the updated Nginx config, and rebuilt browser-ui.html. Validate/reload Nginx,
+restart attauhid-browser-embed-auth.service, then mcp-vps2.service. Auth/MCP
+in-memory sessions restart, so open a new browser panel. Do not restart the shared
+attauhid-browser.service for this change.

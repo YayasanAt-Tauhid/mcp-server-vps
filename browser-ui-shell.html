@@ -15,6 +15,7 @@ body{overflow:hidden}
 .controls button,.bar a{border:1px solid #43516a;background:#29364a;color:#eaf1ff;border-radius:8px;padding:6px 9px;font:inherit;text-decoration:none;white-space:nowrap}
 .controls button.active{background:#eaf1ff;color:#182133;border-color:#eaf1ff}
 .controls button:disabled{opacity:.45}
+.controls button[hidden]{display:none}
 .bar a{display:none;color:#b9d4ff}
 .wrap{position:relative;height:calc(100% - 59px);min-height:420px;background:#0e1219;display:flex;justify-content:center}
 .viewport{position:relative;width:100%;height:100%;transition:max-width .18s ease}
@@ -39,9 +40,10 @@ iframe{display:none;width:100%;height:100%;border:0;background:#111}
     <div class="controls">
       <button id="mode-desktop" type="button" disabled>🖥 Desktop</button>
       <button id="mode-mobile" type="button" disabled>📱 Mobile</button>
+      <button id="mode-retry" type="button" hidden>Sambung ulang</button>
       <button id="mode-fullscreen" type="button" disabled title="Fullscreen">⛶</button>
     </div>
-    <span id="status" class="status">Menyiapkan MCP App…</span>
+    <span id="status" class="status" role="status">Menyiapkan MCP App…</span>
     <a id="external" target="_blank" rel="noopener noreferrer">Buka layar terpisah</a>
   </div>
 </div>
