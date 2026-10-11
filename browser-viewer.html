@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Browser VPS At-Tauhid</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#111827;color:#f8fafc;font:14px system-ui,sans-serif;overflow:hidden}
+body{display:flex;flex-direction:column}
+.toolbar{min-height:52px;display:flex;align-items:center;gap:8px;padding:7px 10px;background:#1f2937;border-bottom:1px solid #374151}
+.brand{font-weight:700;white-space:nowrap}
+.spacer{flex:1}
+.status{font-size:12px;opacity:.85}
+button{border:1px solid #4b5563;background:#273449;color:#f8fafc;border-radius:9px;padding:7px 10px;font:inherit;cursor:pointer}
+button.active{background:#e2e8f0;color:#0f172a}
+button:disabled{opacity:.5;cursor:wait}
+.stage{flex:1;min-height:0;display:flex;justify-content:center;background:#0b1020;position:relative}
+.frame-wrap{width:100%;height:100%}
+.stage.mobile .frame-wrap{max-width:640px}
+iframe{display:block;width:100%;height:100%;border:0;background:#0f172a}
+.notice{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;background:#111827}
+.scroll-controls{position:absolute;right:10px;bottom:12px;z-index:5;display:flex;flex-direction:column;gap:8px}
+.scroll-controls button{width:44px;height:44px;border-radius:999px;padding:0;font-size:22px;background:rgba(31,41,55,.92);box-shadow:0 4px 14px rgba(0,0,0,.35);touch-action:manipulation}
+.scroll-controls[hidden]{display:none}
+.notice[hidden],button[hidden]{display:none}
+body.embedded .toolbar{display:none}
+@media(max-width:700px){.brand{display:none}.toolbar{gap:5px;padding:6px;flex-wrap:wrap}.status{flex-basis:100%;order:2;text-align:center}button{padding:7px 8px;font-size:12px}}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <span class="brand">Browser VPS At-Tauhid</span>
+  <button id="desktop" type="button">🖥 Desktop</button>
+  <button id="mobile" type="button">📱 Mobile</button>
+  <span class="spacer"></span>
+  <span id="status" class="status" role="status">Menghubungkan layar…</span>
+  <button id="retry" type="button" hidden>Sambung ulang</button>
+  <button id="fullscreen" type="button">⛶ Fullscreen</button>
+</div>
+<div id="stage" class="stage">
+  <div class="frame-wrap"><iframe id="vnc" title="Layar browser VPS" allow="fullscreen"></iframe></div>
+  <div id="scroll-controls" class="scroll-controls" hidden aria-label="Kontrol gulir halaman">
+    <button id="scroll-up" type="button" title="Gulir ke atas" aria-label="Gulir ke atas">↑</button>
+    <button id="scroll-down" type="button" title="Gulir ke bawah" aria-label="Gulir ke bawah">↓</button>
+  </div>
+  <div id="notice" class="notice">Menghubungkan layar browser…</div>
+</div>
+<script>
+const desktop=document.getElementById('desktop');
+const mobile=document.getElementById('mobile');
+const fullscreen=document.getElementById('fullscreen');
+const retry=document.getElementById('retry');
+const stage=document.getElementById('stage');
+const status=document.getElementById('status');
+const notice=document.getElementById('notice');
+const scrollControls=document.getElementById('scroll-controls');
+const scrollUp=document.getElementById('scroll-up');
+const scrollDown=document.getElementById('scroll-down');
+const vnc=document.getElementById('vnc');
+const isEmbedded=window.parent!==window;
+document.body.classList.toggle('embedded',isEmbedded);
+const allowedParents=/*__ALLOWED_PARENTS__*/[];
+let currentMode='desktop', state='connecting', observer, timeout, retryTimer, resizeTimer;
+let modeBusy=false, lastSize='';
+let attempts=0, generation=0, lastState='', manualDisconnect=false, loaded=false;
+
+function notifyParent(){
+  if(isEmbedded) window.parent.postMessage({type:'attauhid-browser-state',state,mode:currentMode},'*');
+}
+function updateScrollControls(){
+  scrollControls.hidden=!(currentMode==='mobile'&&state==='connected');
+}
+function setState(value){
+  state=value;
+  const labels={connecting:'Menghubungkan layar…',connected:'Terhubung',disconnected:'Koneksi terputus',error:'Gagal terhubung',auth:'Sesi berakhir — buka ulang panel'};
+  status.textContent=labels[value]||labels.connecting;
+  retry.hidden=!['error','disconnected'].includes(value);
+  updateScrollControls();
+  notifyParent();
+}
+function paint(mode){
+  currentMode=mode==='mobile'?'mobile':'desktop';
+  desktop.classList.toggle('active',currentMode==='desktop');
+  mobile.classList.toggle('active',currentMode==='mobile');
+  stage.classList.toggle('mobile',currentMode==='mobile');
+  updateScrollControls();
+  notifyParent();
+}
+function mobileSize(){
+  const rect=stage.querySelector('.frame-wrap').getBoundingClientRect();
+  return {width:Math.max(320,Math.min(640,Math.round(rect.width))),height:Math.max(320,Math.min(768,Math.round(rect.height)))};
+}
+async function refreshMode(initial=false){
+  try{
+    const r=await fetch('/embed/mode',{cache:'no-store'});
+    if(r.ok){
+      const result=await r.json();
+      paint(result.mode);
+      if(initial) await change(matchMedia('(max-width:700px)').matches?'mobile':result.mode);
+      else if(result.mode==='mobile') scheduleResize();
+    }
+  }catch{}
+}
+async function change(mode){
+  if(modeBusy){scheduleResize();return;}
+  modeBusy=true;
+  desktop.disabled=true;mobile.disabled=true;
+  try{
+    const size=mode==='mobile'?mobileSize():{};
+    const r=await fetch('/embed/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,...size})});
+    if(!r.ok) throw Error('mode');
+    const result=await r.json();
+    paint(result.mode);
+    lastSize=result.mode==='mobile'?JSON.stringify(mobileSize()):'';
+  }catch{status.textContent='Gagal mengubah mode'}
+  finally{modeBusy=false;desktop.disabled=false;mobile.disabled=false}
+}
+function scheduleResize(){
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{
+    if(currentMode==='mobile'&&JSON.stringify(mobileSize())!==lastSize) change('mobile');
+  },350);
+}
+new ResizeObserver(scheduleResize).observe(stage);
+function retryAfterFailure(){
+  if(manualDisconnect||attempts>=2||retryTimer) return;
+  attempts++;
+  retryTimer=setTimeout(()=>{retryTimer=null;connect();},attempts*1500);
+}
+function observeVnc(){
+  const doc=vnc.contentDocument;
+  if(!doc?.getElementById('noVNC_container')){
+    setState('auth');notice.hidden=false;notice.textContent='Sesi berakhir. Buka ulang panel browser.';
+    return;
+  }
+  loaded=true;
+  notice.hidden=true;
+  let hadConnection=false;
+  function update(){
+    const root=doc.documentElement;
+    const error=doc.getElementById('noVNC_status')?.classList.contains('noVNC_status_error');
+    const next=root.classList.contains('noVNC_connected')?'connected':
+      root.classList.contains('noVNC_connecting')||root.classList.contains('noVNC_reconnecting')?'connecting':
+      error?'error':hadConnection?'disconnected':'connecting';
+    const banner=doc.getElementById('noVNC_status');
+    if(next==='connected'&&!error&&banner?.classList.contains('noVNC_open')) banner.classList.remove('noVNC_open');
+    if(next===lastState) return;
+    lastState=next;
+    if(next==='connected'){
+      if(!hadConnection) doc.getElementById('noVNC_control_bar')?.classList.remove('noVNC_open');
+      hadConnection=true;clearTimeout(timeout);
+    }
+    setState(next);
+    if(next==='error'||(next==='disconnected'&&!manualDisconnect)){
+      clearTimeout(timeout);retryAfterFailure();
+    }
+  }
+  observer=new MutationObserver(update);
+  observer.observe(doc.documentElement,{attributes:true,subtree:true,childList:true,characterData:true});
+  doc.addEventListener('click',event=>{
+    if(event.target.closest('#noVNC_connect_button')){
+      event.preventDefault();event.stopImmediatePropagation();attempts=0;connect();
+    }else if(event.target.closest('#noVNC_disconnect_button')){
+      manualDisconnect=true;clearTimeout(retryTimer);retryTimer=null;
+    }
+  },true);
+  update();
+}
+async function connect(){
+  const id=++generation;
+  clearTimeout(timeout);clearTimeout(retryTimer);retryTimer=null;
+  observer?.disconnect();
+  lastState='';manualDisconnect=false;loaded=false;
+  setState('connecting');
+  notice.hidden=false;notice.textContent='Menghubungkan layar browser…';
+  try{
+    const response=await fetch('/embed/connection',{method:'POST',cache:'no-store'});
+    if(id!==generation) return;
+    if(response.status===401){
+      setState('auth');notice.textContent='Sesi berakhir. Buka ulang panel browser.';return;
+    }
+    if(!response.ok) throw Error('connection');
+    const result=await response.json();
+    if(!/^embed\/websockify\?ticket=[a-f0-9]{64}$/.test(result.path)) throw Error('path');
+    const url=new URL('/embed/vnc.html',location.origin);
+    url.searchParams.set('attempt',String(id));
+    url.hash=new URLSearchParams({path:result.path,autoconnect:'1',resize:'scale',reconnect:'0',
+      host:location.hostname,port:location.port,encrypt:location.protocol==='https:'?'1':'0'}).toString();
+    vnc.onload=()=>{if(id===generation) observeVnc()};
+    vnc.src=url.href;
+    timeout=setTimeout(()=>{
+      if(id===generation&&state==='connecting'){
+        setState('error');
+        if(!loaded){notice.hidden=false;notice.textContent='Layar belum tersambung.'}
+        retryAfterFailure();
+      }
+    },15000);
+  }catch{
+    if(id!==generation) return;
+    setState('error');notice.textContent='Layar belum tersambung.';retryAfterFailure();
+  }
+}
+window.addEventListener('message',event=>{
+  if(event.source!==window.parent||!isEmbedded) return;
+  if(!/^https:\/\/[a-z0-9_-]+\.web-sandbox\.oaiusercontent\.com$/.test(event.origin)&&
+     event.origin!==location.origin&&!allowedParents.includes(event.origin)) return;
+  if(event.data?.type==='attauhid-browser-retry'){attempts=0;connect()}
+  if(event.data?.type==='attauhid-browser-mode-refresh') refreshMode();
+});
+async function scrollPage(direction){
+  if(currentMode!=='mobile'||state!=='connected') return;
+  scrollUp.disabled=true;scrollDown.disabled=true;
+  try{
+    // Send wheel input through noVNC itself so the scroll goes to the browser
+    // window that is actually visible to the user. Server-side CDP cannot
+    // reliably identify the active Chromium window when several are open.
+    const doc=vnc.contentDocument;
+    const win=vnc.contentWindow;
+    const canvas=doc?.querySelector('canvas');
+    if(canvas&&win?.WheelEvent){
+      const rect=canvas.getBoundingClientRect();
+      const x=rect.left+Math.max(1,rect.width/2);
+      const y=rect.top+Math.max(1,rect.height/2);
+      const delta=direction==='down'?80:-80;
+      for(let i=0;i<7;i++){
+        canvas.dispatchEvent(new win.WheelEvent('wheel',{
+          bubbles:true,cancelable:true,clientX:x,clientY:y,
+          deltaX:0,deltaY:delta,deltaMode:0
+        }));
+        await new Promise(resolve=>setTimeout(resolve,28));
+      }
+      status.textContent='Terhubung';
+      return;
+    }
+
+    // Fallback for unusual noVNC builds where the canvas is unavailable.
+    const response=await fetch('/embed/scroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({direction})});
+    if(!response.ok) throw Error('scroll');
+    status.textContent='Terhubung';
+  }catch(error){
+    console.error('Scroll failed',error);
+    status.textContent='Gagal menggulir halaman';
+  }finally{scrollUp.disabled=false;scrollDown.disabled=false}
+}
+scrollUp.addEventListener('click',()=>scrollPage('up'));
+scrollDown.addEventListener('click',()=>scrollPage('down'));
+desktop.addEventListener('click',()=>change('desktop'));
+mobile.addEventListener('click',()=>change('mobile'));
+retry.addEventListener('click',()=>{attempts=0;connect()});
+fullscreen.addEventListener('click',async()=>{
+  try{
+    if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+    else await document.exitFullscreen();
+  }catch{status.textContent='Fullscreen tidak tersedia'}
+});
+refreshMode(true);
+connect();
+</script>
+</body>
+</html>
