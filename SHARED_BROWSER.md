@@ -10,7 +10,7 @@ The viewer has desktop/mobile and fullscreen buttons. MCP can navigate, inspect,
 
 ## Authentication and routing
 
-The existing BASE_URL serves /browser/login and /browser/view. No extra DNS or tunnel is required. browser_view and resources/read issue a signed 10-minute link; consuming it creates an 8-hour HttpOnly, Secure, SameSite=Lax cookie scoped to /browser. Links are single-use. An already signed-in viewer can reopen its session without consuming another link.
+The existing BASE_URL serves /browser/login and /browser/view. No extra DNS or tunnel is required. The browser card v2 no longer embeds a one-time signed URL in the cacheable MCP UI resource. Instead, each user click invokes the app-only `browser_get_view_url` tool to mint a fresh 10-minute link; when the mobile host blocks a new tab, the widget offers a newly minted fallback link requiring a second tap. Consuming the signed link creates an 8-hour HttpOnly, Secure, SameSite=Lax cookie scoped to /browser. Links are single-use. An already signed-in viewer can reopen its session without consuming another link. The `browser_view` tool retains its existing `_meta` link for compatibility, but the UI card no longer reuses it. Real ChatGPT widget navigation is a deployment smoke gate; passing local bridge unit tests alone is not proof that every host permits opening a new tab.
 
 The viewer, noVNC assets and WebSocket require that session. WebSocket and mode changes also require the configured BASE_URL origin. A WebSocket is closed when its session expires. MCP/API routes retain existing OAuth/bearer authentication. The browser gateway routes are separate from MCP bearer routes.
 
