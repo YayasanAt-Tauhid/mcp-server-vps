@@ -6,8 +6,8 @@ import {
 } from './browser-tools.js';
 
 
-const BROWSER_UI_URI='ui://safara/browser-card-v2.html';
-const BROWSER_UI_URI_RE=/^ui:\/\/safara\/browser-card-v2\.html$/;
+const BROWSER_UI_URI='ui://safara/browser-card-v3.html';
+const BROWSER_UI_URI_RE=/^ui:\/\/safara\/browser-card-v[23]\.html$/;
 export const sharedBrowserTools=[{
         name: 'browser_view',
         description: 'Tampilkan browser bersama Safara sebagai panel interaktif di ChatGPT. Pengguna dapat memasukkan login langsung di panel.',
@@ -254,6 +254,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
 
     if (name === 'browser_get_view_url') {
       try {
+        console.error('[UI] browser_get_view_url invoked');
         const url = browserViewLink();
         const expiresAt = Number(new URL(url).searchParams.get('expires'));
         return {

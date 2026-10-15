@@ -11,7 +11,23 @@ export function createBrowserAccess(secret, now = Date.now) {
     for (const [key, expires] of sessions) if (expires <= now()) sessions.delete(key);
     for (const [key, expires] of usedLinks) if (expires <= now()) usedLinks.delete(key);
   };
+  const linkStatus = (url) => {
+    const nonce = url.searchParams.get('nonce') || '', sig = url.searchParams.get('sig') || '';
+    const expires = Number(url.searchParams.get('expires'));
+    if (!/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(sig) ||
+        !Number.isSafeInteger(expires)) return 'malformed';
+    if (expires <= now()) return 'expired';
+    if (expires > now() + 600000) return 'future';
+    if (usedLinks.has(nonce)) return 'replayed';
+    if (!crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(sign(nonce, expires), 'hex'))) return 'bad_signature';
+    if (sessions.size >= 1000 || usedLinks.size >= 1000) return 'capacity';
+    return 'valid';
+  };
   return {
+    linkStatus(url) {
+      prune();
+      return linkStatus(url);
+    },
     issueLink(baseUrl) {
       const nonce = crypto.randomBytes(16).toString('hex'), expires = now() + 600000;
       const url = new URL('/browser/login', baseUrl);
@@ -20,11 +36,9 @@ export function createBrowserAccess(secret, now = Date.now) {
     },
     consumeLink(url) {
       prune();
-      const nonce = url.searchParams.get('nonce') || '', sig = url.searchParams.get('sig') || '', expires = Number(url.searchParams.get('expires'));
-      if (!/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(sig) || !Number.isSafeInteger(expires) ||
-          expires <= now() || expires > now() + 600000 || usedLinks.has(nonce)) return null;
-      if (!crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(sign(nonce, expires), 'hex'))) return null;
-      if (sessions.size >= 1000 || usedLinks.size >= 1000) return null;
+      if (linkStatus(url) !== 'valid') return null;
+      const nonce = url.searchParams.get('nonce');
+      const expires = Number(url.searchParams.get('expires'));
       usedLinks.set(nonce, expires);
       const token = crypto.randomBytes(32).toString('hex'), sessionExpires = now() + 28800000;
       sessions.set(token, sessionExpires);
@@ -66,10 +80,35 @@ export function createBrowserGateway({baseUrl, secret, novncRoot = '/usr/share/n
         res.set({'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'});
         next();
       });
+      const invalidLogin = (req, res, status) => {
+        // Never log nonce, signature, query string, cookies or user identity.
+        console.warn('[BROWSER] rejected login ticket:', status);
+        return res.status(401).type('html').send('<!doctype html><meta name="viewport" content="width=device-width"><p>Tautan tidak valid atau kedaluwarsa. Buka kartu browser Safara terbaru di ChatGPT; jangan gunakan tab atau tautan yang tersimpan sebelumnya.</p>');
+      };
       app.get('/browser/login', (req, res) => {
         if (access.session(req.headers.cookie)) return res.redirect(303, '/browser/view');
-        const session = access.consumeLink(new URL(req.originalUrl, baseUrl));
-        if (!session) return res.status(401).type('html').send('<!doctype html><meta name="viewport" content="width=device-width"><p>Tautan tidak valid atau kedaluwarsa. Minta ChatGPT membuka browser Safara kembali.</p>');
+        const status = access.linkStatus(new URL(req.originalUrl, baseUrl));
+        if (status !== 'valid') return invalidLogin(req, res, status);
+        // A preview/prefetch GET must never consume the signed, one-use link.
+        res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+        return res.type('html').send('<!doctype html><html lang="id"><meta name="viewport" content="width=device-width"><meta charset="utf-8"><title>Masuk Browser Safara</title><style>body{max-width:32rem;margin:12vh auto;padding:1.5rem;font:16px system-ui}button{padding:1rem 1.5rem;border-radius:9px;border:0;background:#2357c6;color:white;font:inherit}</style><h2>Browser Safara</h2><p>Tautan berhasil diperiksa. Tekan tombol untuk membuat sesi browser yang aman.</p><form method="post"><button type="submit">Lanjutkan ke browser Safara</button></form><p>Jangan bagikan tautan sesi ini.</p></html>');
+      });
+      app.post('/browser/login', (req, res) => {
+        if (access.session(req.headers.cookie)) return res.redirect(303, '/browser/view');
+        const site = req.headers['sec-fetch-site'];
+        const originHeader = req.headers.origin;
+        // Referrer-Policy:no-referrer can make Chromium submit Origin:null.
+        // Only accept that opaque value if the browser ALSO asserts same-origin.
+        const acceptedOrigin = !originHeader || originHeader === origin ||
+          (originHeader === 'null' && site === 'same-origin');
+        if (!acceptedOrigin || site === 'cross-site') {
+          console.warn('[BROWSER] rejected cross-origin confirmation:',
+            site === 'cross-site' ? 'cross_site_fetch' : 'origin_mismatch');
+          return res.sendStatus(403);
+        }
+        const link = new URL(req.originalUrl, baseUrl);
+        const session = access.consumeLink(link);
+        if (!session) return invalidLogin(req, res, access.linkStatus(link));
         res.set('Set-Cookie','safara_browser=' + session.token + '; Path=/browser; Max-Age=28800; HttpOnly; Secure; SameSite=Lax');
         return res.redirect(303, '/browser/view');
       });
