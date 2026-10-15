@@ -38,9 +38,11 @@ try{
  for(const path of ['/browser/view','/browser/vnc.html','/browser/core/rfb.js'])assert.equal((await fetch(base+path)).status,401);
  assert.equal(await rejectedWS('',base),401);pass('viewer assets and websocket require session');
  const view=await raw('browser_view');const link=view._meta.browserViewUrl;assert(link);
- const login=await fetch(link,{redirect:'manual'});assert.equal(login.status,303);
+ const preview=await fetch(link,{redirect:'manual'});assert.equal(preview.status,200);
+ assert.equal((await fetch(link,{redirect:'manual'})).status,200); // preview must not consume
+ const login=await fetch(link,{method:'POST',headers:{Origin:base},redirect:'manual'});assert.equal(login.status,303);
  const cookie=login.headers.get('set-cookie').split(';')[0];assert(login.headers.get('set-cookie').includes('HttpOnly'));
- assert.equal((await fetch(link,{redirect:'manual'})).status,401);
+ assert.equal((await fetch(link,{method:'POST',headers:{Origin:base},redirect:'manual'})).status,401);
  assert.equal(await rejectedWS(cookie,'https://attacker.invalid'),403);pass('signed login, replay and origin checks');
  const tabs=await call('browser_tabs',{action:'new',url:'http://127.0.0.1:3112'});testTab=tabs.find(t=>t.active).index;
  const snap=await call('browser_snapshot',{tabIndex:testTab});assert(snap.interactive.some(x=>x.type==='password'));
@@ -57,8 +59,8 @@ try{
  browser=await chromium.launch({headless:true,chromiumSandbox:true,executablePath:'/opt/safara/playwright-browsers/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell'});
  const ctx=await browser.newContext({viewport:{width:1366,height:900}});
  const newLink=(await raw('browser_view'))._meta.browserViewUrl;
- const page=await ctx.newPage();await page.goto(newLink);
- try { await page.frameLocator('iframe').locator('html.noVNC_connected').waitFor({timeout:12000}); } catch(err) { console.log('VIEWER',new URL(page.url()).pathname); for(const f of page.frames())console.log('FRAME',new URL(f.url()).pathname,(await f.locator('body').innerText().catch(()=>'' )).slice(0,700)); await page.screenshot({path:'/tmp/safara-shared-browser-review.png'});  throw err; }
+ const page=await ctx.newPage();await page.goto(newLink);await page.getByRole('button',{name:'Lanjutkan ke browser Safara'}).click();
+ try { await page.frameLocator('iframe').locator('html.noVNC_connected').waitFor({timeout:12000}); } catch(err) { console.log('VIEWER',new URL(page.url()).pathname); for(const f of page.frames())console.log('FRAME',new URL(f.url()).pathname,(await f.locator('body').innerText().catch(()=>'' )).slice(0,700)); await page.screenshot({path:'/tmp/safara-shared-browser-review.png'}); console.log('SAFE_BROWSER_DIAGNOSTICS', diagnostics.split('\n').filter(x=>x.includes('[BROWSER]')).join('; ').slice(-500)); throw err; }
  await page.locator('[data-mode=mobile]').click();await page.locator('[data-mode=mobile][aria-pressed=true]').waitFor();
  await page.locator('[data-mode=desktop]').click();await page.locator('[data-mode=desktop][aria-pressed=true]').waitFor();
  await page.waitForTimeout(1800);await page.screenshot({path:'/tmp/safara-shared-browser-review.png'});
