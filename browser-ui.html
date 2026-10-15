@@ -15,9 +15,12 @@ body{padding:12px}
 .title{font-size:17px;font-weight:700;line-height:1.2}
 .sub{font-size:13px;opacity:.68;margin-top:3px}
 .desc{font-size:14px;line-height:1.5;opacity:.84;margin:0 0 16px}
-.open{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:50px;padding:0 16px;border-radius:14px;text-decoration:none;font-weight:650;background:rgba(127,127,127,.10);border:1px solid rgba(127,127,127,.24);color:inherit}
+.open{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:50px;padding:0 16px;border-radius:14px;text-decoration:none;font-weight:650;background:rgba(127,127,127,.10);border:1px solid rgba(127,127,127,.24);color:inherit;cursor:pointer;text-align:left;font:inherit}
+.open[hidden]{display:none}
+.open:disabled{opacity:.65;cursor:wait}
 .open:active{transform:scale(.995)}
 .hint{font-size:12px;opacity:.58;text-align:center;margin:12px 2px 0}
+.status{font-size:13px;line-height:1.5;margin:9px 0}
 </style>
 </head>
 <body>
@@ -30,11 +33,62 @@ body{padding:12px}
       </div>
     </div>
     <p class="desc">Buka browser bersama untuk bekerja bersama AI. Anda dapat memasukkan login langsung di sana.</p>
-    <a class="open" href="__BROWSER_VIEW_URL__" target="_blank" rel="noopener noreferrer">
+    <button class="open" type="button" id="open-browser">
       <span>▣&nbsp;&nbsp;Buka browser Safara</span>
       <span>›</span>
+    </button>
+    <p id="view-status" class="status" role="status" aria-live="polite"></p>
+    <a id="fallback-link" class="open" hidden target="_blank" rel="noopener noreferrer">
+      <span>▣&nbsp;&nbsp;Buka tautan sesi baru</span>
+      <span>›</span>
     </a>
-    <div class="hint">Login dan cookie tetap memakai sesi Chromium VPS yang sama.</div>
+    <div class="hint">Setiap klik meminta tautan baru agar tidak memakai tautan sekali pakai yang kedaluwarsa. Jika tab baru diblokir, gunakan tautan cadangan di atas.</div>
   </div>
+<script>
+const button = document.getElementById('open-browser');
+const fallback = document.getElementById('fallback-link');
+const status = document.getElementById('view-status');
+const allowedOrigin = __BROWSER_ORIGIN__;
+button.addEventListener('click', async () => {
+  if (button.disabled) return;
+  button.disabled = true;
+  fallback.hidden = true;
+  fallback.removeAttribute('href');
+  status.textContent = 'Meminta sesi browser baru…';
+  // Open synchronously while user activation is available, before awaiting the host bridge.
+  let popup = null;
+  try { popup = window.open('about:blank', '_blank'); } catch {}
+  try {
+    if (typeof window.openai?.callTool !== 'function') throw new Error('Tool bridge unavailable');
+    const result = await window.openai.callTool('browser_get_view_url', {});
+    const raw = result?.structuredContent?.url;
+    if (typeof raw !== 'string') throw new Error('Missing session URL');
+    const next = new URL(raw);
+    if (next.origin !== allowedOrigin || next.pathname !== '/browser/login' ||
+        next.username || next.password || !next.searchParams.has('sig')) {
+      throw new Error('Invalid session target');
+    }
+    if (popup && !popup.closed) {
+      try {
+        popup.opener = null;
+        popup.location.replace(next.href);
+        status.textContent = 'Browser dibuka pada tab baru.';
+        return;
+      } catch {
+        try { popup.close(); } catch {}
+      }
+    }
+    // Some ChatGPT/mobile hosts block popups. Require an explicit user click instead.
+    fallback.href = next.href;
+    fallback.hidden = false;
+    status.textContent = 'Tab baru diblokir. Klik tautan sesi baru di bawah.';
+  } catch {
+    try { if (popup && !popup.closed) popup.close(); } catch {}
+    status.textContent = 'Sesi tidak dapat dibuat dari panel ini. Hubungkan ulang konektor Safara, lalu coba lagi.';
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
 </body>
 </html>

@@ -6,8 +6,8 @@ import {
 } from './browser-tools.js';
 
 
-const BROWSER_UI_URI='ui://safara/browser-card-v1.html';
-const BROWSER_UI_URI_RE=/^ui:\/\/safara\/browser-card-v1\.html$/;
+const BROWSER_UI_URI='ui://safara/browser-card-v2.html';
+const BROWSER_UI_URI_RE=/^ui:\/\/safara\/browser-card-v2\.html$/;
 export const sharedBrowserTools=[{
         name: 'browser_view',
         description: 'Tampilkan browser bersama Safara sebagai panel interaktif di ChatGPT. Pengguna dapat memasukkan login langsung di panel.',
@@ -213,7 +213,7 @@ export function registerBrowserResources(server, browserViewLink, baseUrl) {
     return { contents: [{
       uri: requestedUri,
       mimeType: 'text/html;profile=mcp-app',
-      text: readFileSync(new URL('./browser-ui.html', import.meta.url), 'utf8').replace('__BROWSER_VIEW_URL__', browserViewLink()),
+      text: readFileSync(new URL('./browser-ui.html', import.meta.url), 'utf8').replace('__BROWSER_ORIGIN__', JSON.stringify(new URL(baseUrl).origin)),
       _meta: {
         ui: {
           prefersBorder: false,
