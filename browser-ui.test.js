@@ -3,89 +3,88 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
-const html = readFileSync(new URL('./browser-ui.html', import.meta.url), 'utf8');
-const origin = 'https://mcp.example.test';
+const origin = 'https://mcp.safara.biz.id';
+const source = readFileSync(new URL('./browser-ui-src.js', import.meta.url),'utf8');
 
-function setup({popupBlocked = false, popupThrows = false, urlForCall = (n) => origin + '/browser/login?sig=fixture-' + n} = {}) {
-  const callbacks = new Map(), opened = [], closed = [], fallbacks = [];
-  const button = { disabled: false, addEventListener(event, callback) { callbacks.set(event, callback); } };
-  const fallback = { hidden: true, href: '', removeAttribute(name) { if (name === 'href') this.href = ''; } };
-  const status = { textContent: '' };
-  let calls = 0;
-  const window = {
-    open() {
-      if (popupThrows) throw new Error('Popup blocked by sandbox');
-      if (popupBlocked) return null;
-      const popup = {
-        closed: false, opener: {},
-        location: { replace(url) { opened.push(url); } },
-        close() { closed.push(true); this.closed = true; }
-      };
-      return popup;
-    },
-    openai: {
-      async callTool(name, args) {
-        assert.equal(name, 'browser_get_view_url');
-        assert.equal(Object.keys(args).length, 0);
-        return { structuredContent: { url: urlForCall(++calls) } };
-      }
+async function setup({invalid = false, connectFails = false} = {}) {
+  const callbacks = new Map();
+  const nodes = Object.fromEntries(['browser','empty','status','retry','desktop','mobile','external'].map(id => [
+    id, { disabled: false, hidden: false, textContent: '', src: '',
+      addEventListener(type,handler) { callbacks.set(id+':'+type,handler); }
     }
-  };
-  const document = { getElementById(id) {
-    const elements = { 'open-browser': button, 'fallback-link': fallback, 'view-status': status };
-    if (!(id in elements)) throw Error('Unexpected DOM ID: ' + id);
-    return elements[id];
-  }};
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-  assert.equal(scripts.length, 1);
-  const script = scripts[0][1].replace('__BROWSER_ORIGIN__', JSON.stringify(origin));
-  vm.runInNewContext(script, { window, document, URL });
+  ]));
+  const links = [];
+  const calls = [];
+  let counter = 0;
+  class FakeApp {
+    async connect() { if (connectFails) throw Error('unsupported'); }
+    async callServerTool({name,arguments: args}) {
+      calls.push({name,args});
+      if (name === 'browser_get_view_url') {
+        ++counter;
+        const url = invalid ? 'https://attacker.test/browser/login?nonce=invalid'
+          : origin+'/browser/login?nonce='+String(counter).padStart(32,'0')+
+          '&expires=1790000000000&sig='+'a'.repeat(64);
+        return {structuredContent:{url}};
+      }
+      return {structuredContent:{mode:args.mode}};
+    }
+    async openLink({url}) { links.push(url); }
+  }
+  const window = {};
+  if (connectFails) {
+    const bridge = new FakeApp();
+    window.openai = {callTool:(name,args)=>bridge.callServerTool({name,arguments:args})};
+  }
+  const js = source.replace(/^import\s+\{ App \} from '@modelcontextprotocol\/ext-apps';\s*/,'')
+    .replace('__BROWSER_ORIGIN__', JSON.stringify(origin));
+  vm.runInNewContext(js,{ App:FakeApp,URL,document:{getElementById:(id)=>nodes[id]},window,console });
+  async function flush() {
+    for (let i=0;i<6;i++) await new Promise(resolve=>setImmediate(resolve));
+  }
+  await flush();
   return {
-    async click() { await callbacks.get('click')(); },
-    button, fallback, status, opened, closed, fallbacks,
-    get calls() { return calls; }
+    nodes,calls,links,
+    async click(id) { assert.ok(callbacks.has(id+':click'));await callbacks.get(id+':click')(); await flush(); },
+    get issued(){return counter;}
   };
 }
 
-test('browser card never caches a one-time login URL in the HTML resource', () => {
-  assert.doesNotMatch(html, /__BROWSER_VIEW_URL__/);
-  assert.match(html, /browser_get_view_url/);
-  assert.match(html, /id="open-browser"/);
+test('browser panel requests fresh signed iframe URL from MCP Apps SDK at startup and retry',async()=>{
+  const ui=await setup();
+  assert.equal(ui.issued,1);
+  assert.match(ui.nodes.browser.src,/^https:\/\/mcp\.safara\.biz\.id\/browser\/login\?/);
+  assert.equal(ui.nodes.empty.hidden,true);
+  await ui.click('retry');
+  assert.equal(ui.issued,2);
+  assert.notEqual(ui.calls[0].args?.mode,'mobile');
+  assert.match(ui.nodes.browser.src,/nonce=0{31}2/);
 });
 
-test('each browser opening requests a new link even when same card is reused', async () => {
-  const ui = setup();
-  await ui.click();
-  await ui.click();
-  assert.equal(ui.calls, 2);
-  assert.deepEqual(ui.opened, [
-    origin + '/browser/login?sig=fixture-1',
-    origin + '/browser/login?sig=fixture-2'
-  ]);
-  assert.equal(ui.button.disabled, false);
+test('Safara panel refuses unsafe session targets and provides visible error',async()=>{
+  const ui=await setup({invalid:true});
+  assert.equal(ui.nodes.browser.src,'');
+  assert.equal(ui.nodes.empty.hidden,false);
+  assert.match(ui.nodes.status.textContent,/Gagal terhubung/);
 });
 
-test('popup-blocked viewer offers newly signed link to click directly', async () => {
-  const ui = setup({ popupBlocked: true });
-  await ui.click();
-  assert.equal(ui.calls, 1);
-  assert.equal(ui.fallback.hidden, false);
-  assert.equal(ui.fallback.href, origin + '/browser/login?sig=fixture-1');
+test('external view uses host openLink with a newly minted signed session',async()=>{
+  const ui=await setup();
+  await ui.click('external');
+  assert.equal(ui.issued,2);
+  assert.equal(ui.links.length,1);
+  assert.match(ui.links[0],/nonce=0{31}2/);
 });
 
-test('sandbox popup exception still produces a fresh fallback link', async () => {
-  const ui = setup({ popupThrows: true });
-  await ui.click();
-  assert.equal(ui.calls, 1);
-  assert.equal(ui.fallback.hidden, false);
-  assert.equal(ui.fallback.href, origin + '/browser/login?sig=fixture-1');
+test('mobile mode invokes existing secured browser_set_mode tool',async()=>{
+  const ui=await setup();
+  await ui.click('mobile');
+  assert.equal(ui.calls.at(-1).name,'browser_set_mode');
+  assert.equal(ui.calls.at(-1).args.mode,'mobile');
 });
 
-test('browser card rejects a login link on another origin', async () => {
-  const ui = setup({urlForCall: () => 'https://untrusted.example/browser/login'});
-  await ui.click();
-  assert.equal(ui.opened.length, 0);
-  assert.equal(ui.closed.length, 1);
-  assert.equal(ui.button.disabled, false);
-  assert.match(ui.status.textContent, /tidak dapat/i);
+test('older ChatGPT bridge remains a fallback when MCP Apps connection is unavailable',async()=>{
+  const ui=await setup({connectFails:true});
+  assert.equal(ui.issued,1);
+  assert.match(ui.nodes.browser.src,/^https:\/\/mcp\.safara\.biz\.id\/browser\/login/);
 });

@@ -52,6 +52,11 @@ export function createBrowserAccess(secret, now = Date.now) {
   };
 }
 
+// Only the explicitly trusted ChatGPT UI ancestors can embed a signed-in browser.
+// The browser itself remains session-protected and all state-changing routes
+// enforce same-origin requests.
+const EMBED_ANCESTORS = "'self' https://chatgpt.com https://chat.openai.com https://*.web-sandbox.oaiusercontent.com";
+
 const viewerHtml = `<!doctype html><html lang="id"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Browser Bersama Safara</title><style>body{margin:0;background:#101827;color:#eef3ff;font:14px system-ui}header{height:56px;display:flex;align-items:center;gap:10px;padding:0 16px}strong{margin-right:auto}button{padding:9px 13px;border:1px solid #506080;border-radius:8px;background:#23334d;color:white;cursor:pointer}button[aria-pressed=true]{background:#315fe8}iframe{display:block;border:0;width:100%;height:calc(100dvh - 86px)}footer{height:30px;text-align:center;color:#b9c7df;font-size:12px}#status{margin-left:8px}</style>
 <header><strong>Browser Safara</strong><button data-mode="desktop">Desktop</button><button data-mode="mobile">Mobile</button><button id="full">Layar penuh</button></header>
@@ -90,7 +95,7 @@ export function createBrowserGateway({baseUrl, secret, novncRoot = '/usr/share/n
         const status = access.linkStatus(new URL(req.originalUrl, baseUrl));
         if (status !== 'valid') return invalidLogin(req, res, status);
         // A preview/prefetch GET must never consume the signed, one-use link.
-        res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+        res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors " + EMBED_ANCESTORS);
         return res.type('html').send('<!doctype html><html lang="id"><meta name="viewport" content="width=device-width"><meta charset="utf-8"><title>Masuk Browser Safara</title><style>body{max-width:32rem;margin:12vh auto;padding:1.5rem;font:16px system-ui}button{padding:1rem 1.5rem;border-radius:9px;border:0;background:#2357c6;color:white;font:inherit}</style><h2>Browser Safara</h2><p>Tautan berhasil diperiksa. Tekan tombol untuk membuat sesi browser yang aman.</p><form method="post"><button type="submit">Lanjutkan ke browser Safara</button></form><p>Jangan bagikan tautan sesi ini.</p></html>');
       });
       app.post('/browser/login', (req, res) => {
@@ -109,7 +114,7 @@ export function createBrowserGateway({baseUrl, secret, novncRoot = '/usr/share/n
         const link = new URL(req.originalUrl, baseUrl);
         const session = access.consumeLink(link);
         if (!session) return invalidLogin(req, res, access.linkStatus(link));
-        res.set('Set-Cookie','safara_browser=' + session.token + '; Path=/browser; Max-Age=28800; HttpOnly; Secure; SameSite=Lax');
+        res.set('Set-Cookie','safara_browser=' + session.token + '; Path=/browser; Max-Age=28800; HttpOnly; Secure; SameSite=None; Partitioned');
         return res.redirect(303, '/browser/view');
       });
       app.use('/browser', (req, res, next) => {
@@ -117,7 +122,7 @@ export function createBrowserGateway({baseUrl, secret, novncRoot = '/usr/share/n
         next();
       });
       app.get('/browser/view', (req,res) => {
-        res.set('Content-Security-Policy',"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+        res.set('Content-Security-Policy',"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; frame-ancestors " + EMBED_ANCESTORS + "; base-uri 'none'");
         res.type('html').send(viewerHtml);
       });
       app.post('/browser/mode', async (req,res) => {

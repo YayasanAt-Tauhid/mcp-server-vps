@@ -6,8 +6,8 @@ import {
 } from './browser-tools.js';
 
 
-const BROWSER_UI_URI='ui://safara/browser-card-v3.html';
-const BROWSER_UI_URI_RE=/^ui:\/\/safara\/browser-card-v[23]\.html$/;
+const BROWSER_UI_URI='ui://safara/browser-v4.html';
+const BROWSER_UI_URI_RE=/^ui:\/\/safara\/(?:browser-card-v[23]|browser-v4)\.html$/;
 export const sharedBrowserTools=[{
         name: 'browser_view',
         description: 'Tampilkan browser bersama Safara sebagai panel interaktif di ChatGPT. Pengguna dapat memasukkan login langsung di panel.',
@@ -194,6 +194,7 @@ export function registerBrowserResources(server, browserViewLink, baseUrl) {
       name: 'Browser Safara',
       mimeType: 'text/html;profile=mcp-app',
       _meta: {
+        'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
         ui: {
           prefersBorder: false,
           csp: {
@@ -223,7 +224,7 @@ export function registerBrowserResources(server, browserViewLink, baseUrl) {
             frameDomains: [new URL(baseUrl).origin]
           }
         },
-        'openai/ui': { availableDisplayModes: ['inline'] },
+        'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
         'openai/widgetDescription': 'Browser bersama Safara yang dapat dikendalikan langsung dari ChatGPT.',
         'openai/widgetPrefersBorder': false,
         'openai/widgetCSP': {

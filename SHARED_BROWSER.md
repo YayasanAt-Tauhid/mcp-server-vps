@@ -34,6 +34,14 @@ Safara deployment:
 
 run-shared-browser.sh allows SHARED_BROWSER_DISPLAY, SHARED_BROWSER_STATE_DIR and SHARED_BROWSER_EXECUTABLE_PATH overrides. The provided unit is a Safara deployment example; adapt the user and paths on another VPS. Existing headless browser smoke stays on its existing canonical headless-shell installation.
 
+## MCP Apps panel v4 — October 2026
+
+Panel v4 uses the official `@modelcontextprotocol/ext-apps` bridge (rather than relying solely on the legacy `window.openai.callTool`). `browser_view` advertises `ui://safara/browser-v4.html` to avoid cached v3 widget metadata. The embedded iframe targets the existing `/browser/login` route; the human must confirm the preview-safe login page before the one-use ticket is consumed. The viewer still uses the same shared Chromium profile and noVNC transport.
+
+To support an authenticated browser in a cross-site MCP App iframe, the viewer now issues `Secure; HttpOnly; SameSite=None; Partitioned` cookies scoped to `/browser`. Login and viewer framing is restricted by CSP `frame-ancestors` to `self`, `chatgpt.com`, `chat.openai.com`, and the ChatGPT web-sandbox origin pattern; all write operations and WebSockets retain same-origin checks. Any unsupported mobile host can use the *Buka layar penuh* button, which mints a fresh signed URL through the MCP Apps bridge and calls `openLink` directly. Never expose a static unsigned noVNC URL.
+
+UI source is `browser-ui-src.js` plus `browser-ui-shell.html`; run `npm run build` to generate the tracked `browser-ui.html`. Build-only dependencies are in `devDependencies`; the production `index.js` runtime does not import them. `npm test` covers MCP resource metadata, signed session, CSP/cookie restrictions, UI actions, and legacy host fallback. A green server test does not by itself prove that a specific ChatGPT Android client renders the panel; verify on the actual device after release. If `browser_view` is invoked but `/resources/read` never appears, troubleshoot connector/host rendering separately.
+
 ## Upload fixes
 
 Upload tokens are checked again after body parsing so concurrent requests cannot reuse a consumed slot. Destination parent realpaths must remain within the slot's allowed roots; symlink/nonregular destinations are rejected. Default non-overwrite writes use exclusive file creation and mode 600.
