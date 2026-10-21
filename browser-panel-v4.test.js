@@ -8,7 +8,7 @@ import { sharedBrowserTools, registerBrowserResources } from './shared-browser.j
 const html = () => readFileSync(new URL('./browser-ui.html', import.meta.url), 'utf8');
 const source = () => readFileSync(new URL('./browser-ui-src.js', import.meta.url), 'utf8');
 
-test('Safara panel v4 uses the MCP Apps bridge instead of only the legacy window.openai bridge', () => {
+test('Safara panel v5 uses the MCP Apps bridge instead of only the legacy window.openai bridge', () => {
   assert.match(source(), /import\s*\{\s*App\s*\}\s*from\s*['"]@modelcontextprotocol\/ext-apps['"]/);
   assert.match(source(), /await\s+app\.connect\(\)/);
   assert.match(source(), /app\.callServerTool\(/);
@@ -20,7 +20,7 @@ test('Safara panel v4 uses the MCP Apps bridge instead of only the legacy window
 test('Safara browser panel advertises a new UI resource URI to invalidate cached card v3', () => {
   const view = sharedBrowserTools.find(tool => tool.name === 'browser_view');
   assert.ok(view);
-  assert.equal(view._meta.ui.resourceUri, 'ui://safara/browser-v4.html');
+  assert.equal(view._meta.ui.resourceUri, 'ui://safara/browser-v5.html');
   assert.equal(view._meta['openai/outputTemplate'], view._meta.ui.resourceUri);
   assert.equal(view._meta['openai/widgetAccessible'], true);
 });

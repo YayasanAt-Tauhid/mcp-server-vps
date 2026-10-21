@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import {safeBrowserViewUrl,extractBrowserViewUrl} from './browser-session-compat.js';
 
 const origin = 'https://mcp.safara.biz.id';
 const source = readFileSync(new URL('./browser-ui-src.js', import.meta.url),'utf8');
@@ -24,7 +25,7 @@ async function setup({invalid = false, connectFails = false} = {}) {
         ++counter;
         const url = invalid ? 'https://attacker.test/browser/login?nonce=invalid'
           : origin+'/browser/login?nonce='+String(counter).padStart(32,'0')+
-          '&expires=1790000000000&sig='+'a'.repeat(64);
+          '&expires='+String(Date.now()+300000)+'&sig='+'a'.repeat(64);
         return {structuredContent:{url}};
       }
       return {structuredContent:{mode:args.mode}};
@@ -37,8 +38,9 @@ async function setup({invalid = false, connectFails = false} = {}) {
     window.openai = {callTool:(name,args)=>bridge.callServerTool({name,arguments:args})};
   }
   const js = source.replace(/^import\s+\{ App \} from '@modelcontextprotocol\/ext-apps';\s*/,'')
+    .replace(/import\s+\{ safeBrowserViewUrl, extractBrowserViewUrl \} from '\.\/browser-session-compat\.js';\s*/,'')
     .replace('__BROWSER_ORIGIN__', JSON.stringify(origin));
-  vm.runInNewContext(js,{ App:FakeApp,URL,document:{getElementById:(id)=>nodes[id]},window,console });
+  vm.runInNewContext(js,{ App:FakeApp,URL,safeBrowserViewUrl,extractBrowserViewUrl,document:{getElementById:(id)=>nodes[id]},window,console });
   async function flush() {
     for (let i=0;i<6;i++) await new Promise(resolve=>setImmediate(resolve));
   }

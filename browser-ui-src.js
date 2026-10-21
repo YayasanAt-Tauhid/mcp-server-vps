@@ -1,7 +1,8 @@
 import { App } from '@modelcontextprotocol/ext-apps';
+import { safeBrowserViewUrl, extractBrowserViewUrl } from './browser-session-compat.js';
 
 const ORIGIN = __BROWSER_ORIGIN__;
-const app = new App({ name: 'Browser Safara', version: '4.0.0' });
+const app = new App({ name: 'Browser Safara', version: '5.0.0' });
 const frame = document.getElementById('browser');
 const empty = document.getElementById('empty');
 const status = document.getElementById('status');
@@ -11,19 +12,28 @@ const mobile = document.getElementById('mobile');
 const external = document.getElementById('external');
 let connected = false;
 let opening = false;
+let opened = false;
 
-function safeUrl(value) {
-  if (typeof value !== 'string') return null;
+function openView(value) {
+  const url = safeBrowserViewUrl(value, ORIGIN);
+  if (!url || opened) return false;
+  opened = true;
+  frame.src = url;
+  empty.hidden = true;
+  status.textContent = 'Layar browser terbuka. Konfirmasikan sesi Safara pada layar.';
+  return true;
+}
+
+// The Android host can deliver the original tool result before the app bridge
+// finishes its handshake. Read only trusted signed links, never credentials.
+function readHostMetadata() {
   try {
-    const url = new URL(value);
-    if (url.origin !== ORIGIN || url.pathname !== '/browser/login' || url.username || url.password) return null;
-    if (!/^[a-f0-9]{32}$/.test(url.searchParams.get('nonce') || '') ||
-        !/^[a-f0-9]{64}$/.test(url.searchParams.get('sig') || '') ||
-        !/^\d{13}$/.test(url.searchParams.get('expires') || '')) return null;
-    return url.href;
-  } catch {
-    return null;
-  }
+    const host = window.openai;
+    const url = extractBrowserViewUrl(host?.toolResponseMetadata, ORIGIN) ||
+      extractBrowserViewUrl(host?.toolOutput, ORIGIN) ||
+      extractBrowserViewUrl(host, ORIGIN);
+    return openView(url);
+  } catch { return false; }
 }
 
 async function callTool(name, args = {}) {
@@ -35,7 +45,7 @@ async function callTool(name, args = {}) {
 async function newSession() {
   const result = await callTool('browser_get_view_url');
   if (result?.isError) throw Error('Tidak dapat membuat tiket sesi');
-  const url = safeUrl(result?.structuredContent?.url);
+  const url = extractBrowserViewUrl(result, ORIGIN);
   if (!url) throw Error('Tiket browser tidak sesuai domain atau format');
   return url;
 }
@@ -47,13 +57,17 @@ async function showFrame() {
   status.textContent = 'Meminta sesi browser baru…';
   try {
     const url = await newSession();
-    frame.src = url;
-    empty.hidden = true;
-    status.textContent = 'Layar browser terbuka. Konfirmasikan sesi Safara pada layar.';
+    // Explicit retry is allowed to refresh a used or expired signed link.
+    opened = false;
+    if (!openView(url)) throw Error('Tiket tidak valid');
   } catch {
-    status.textContent = 'Gagal terhubung. Coba muat ulang atau buka layar penuh.';
-    empty.hidden = false;
-    empty.textContent = 'Panel belum dapat menghubungi sesi browser Safara.';
+    status.textContent = opened
+      ? 'Sesi lama tersedia. Bila terputus, coba muat ulang.'
+      : 'Gagal terhubung. Coba muat ulang atau buka layar penuh.';
+    if (!opened) {
+      empty.hidden = false;
+      empty.textContent = 'Panel belum dapat menghubungi sesi browser Safara.';
+    }
   } finally {
     retry.disabled = false;
     opening = false;
@@ -96,17 +110,21 @@ mobile.addEventListener('click', () => setMode('mobile'));
 external.addEventListener('click', openExternal);
 
 async function start() {
-  app.ontoolresult = () => {}; // Ticket always generated fresh by the app-only tool.
+  app.ontoolresult = result => {
+    const url = extractBrowserViewUrl(result, ORIGIN);
+    if (url) openView(url);
+  };
+  readHostMetadata();
   try {
     await app.connect();
     connected = true;
   } catch {
-    status.textContent = 'Host MCP Apps tidak mendukung koneksi. Mencoba bridge kompatibilitas…';
+    if (!opened) status.textContent = 'Host MCP Apps tidak mendukung koneksi. Mencoba bridge kompatibilitas…';
   }
   retry.disabled = false;
   desktop.disabled = false;
   mobile.disabled = false;
   external.disabled = false;
-  await showFrame();
+  if (!opened && !readHostMetadata()) await showFrame();
 }
 start();

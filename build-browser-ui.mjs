@@ -21,5 +21,5 @@ const bundle = result.outputFiles[0].text
   .replace(/secret(?=\s*[:=]\s*\S{8,})/g, 'secr\\u0065t');
 if (!shell.includes('/*__BROWSER_UI_BUNDLE__*/')) throw Error('Browser UI placeholder missing');
 if (!bundle.includes('__BROWSER_ORIGIN__')) throw Error('Origin sentinel missing');
-const output = shell.replace('/*__BROWSER_UI_BUNDLE__*/',bundle).replace(/[ \t]+$/gm,'');
+const output = shell.replace('/*__BROWSER_UI_BUNDLE__*/', () => bundle).replace(/[ \t]+$/gm,'');
 await writeFile('browser-ui.html',output);

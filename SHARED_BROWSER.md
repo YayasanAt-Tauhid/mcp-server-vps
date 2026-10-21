@@ -42,6 +42,12 @@ To support an authenticated browser in a cross-site MCP App iframe, the viewer n
 
 UI source is `browser-ui-src.js` plus `browser-ui-shell.html`; run `npm run build` to generate the tracked `browser-ui.html`. Build-only dependencies are in `devDependencies`; the production `index.js` runtime does not import them. `npm test` covers MCP resource metadata, signed session, CSP/cookie restrictions, UI actions, and legacy host fallback. A green server test does not by itself prove that a specific ChatGPT Android client renders the panel; verify on the actual device after release. If `browser_view` is invoked but `/resources/read` never appears, troubleshoot connector/host rendering separately.
 
+## MCP Apps panel v5 — Android build/metadata compatibility (21 October 2026)
+
+Version v5 (`ui://safara/browser-v5.html`) addresses two independent display hazards found by comparing the working At-Tauhid MCP browser: (1) using `String.replace(search, bundle)` to insert minified JavaScript into the HTML shell interprets JS dollar sequences as replacement patterns and silently corrupts the executable bundle; `replace(search, () => bundle)` preserves it byte-for-byte; and (2) the host may provide a signed browser ticket in original `toolResponseMetadata` or `toolOutput` before the MCP Apps bridge finishes connecting. The panel tries this metadata path and `ontoolresult`, with a fallback to the existing app-only `browser_get_view_url` call. No cached resource embeds a signed URL.
+
+Browser ticket validation still requires the exact expected origin and `/browser/login` path, one nonce/signature/expiry set, an unexpired timestamp and no credentials, fragment or duplicate query keys. The server remains authoritative for HMAC validation, single-use tickets and sessions. Do not log or document actual signed URLs. A real headless Chromium test with simulated host metadata and an adversarial URL proves the panel JavaScript runs and unsafe targets are rejected; syntax-integrity regression testing guards future builds. Only confirmation in ChatGPT Android can close the final host-rendering verification gate.
+
 ## Upload fixes
 
 Upload tokens are checked again after body parsing so concurrent requests cannot reuse a consumed slot. Destination parent realpaths must remain within the slot's allowed roots; symlink/nonregular destinations are rejected. Default non-overwrite writes use exclusive file creation and mode 600.

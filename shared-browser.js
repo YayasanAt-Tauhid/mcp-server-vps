@@ -6,8 +6,8 @@ import {
 } from './browser-tools.js';
 
 
-const BROWSER_UI_URI='ui://safara/browser-v4.html';
-const BROWSER_UI_URI_RE=/^ui:\/\/safara\/(?:browser-card-v[23]|browser-v4)\.html$/;
+const BROWSER_UI_URI='ui://safara/browser-v5.html';
+const BROWSER_UI_URI_RE=/^ui:\/\/safara\/(?:browser-card-v[23]|browser-v[45])\.html$/;
 export const sharedBrowserTools=[{
         name: 'browser_view',
         description: 'Tampilkan browser bersama Safara sebagai panel interaktif di ChatGPT. Pengguna dapat memasukkan login langsung di panel.',
