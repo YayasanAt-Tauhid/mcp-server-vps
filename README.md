@@ -24,6 +24,7 @@ Dokumentasi lengkap:
 - `SETUP_NEW_VPS.md`
 - `SETUP_NEW_PROJECT.md`
 - `CHATGPT_SETUP.md`
+- `ASSISTANT_TOOLS.md` — memori/skills per proyek dan pekerjaan dengan ID/status persisten (3.11.0).
 
 ## Tool project-aware
 

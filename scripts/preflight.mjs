@@ -37,8 +37,15 @@ const warnings = [];
 
 const nodeMajor = Number(process.versions.node.split('.')[0]);
 if (!Number.isInteger(nodeMajor) || nodeMajor < 20) errors.push('Node.js >= 20 diperlukan');
-for (const command of ['node', 'npm', 'git', 'systemctl']) {
+for (const command of ['node', 'npm', 'git', 'systemctl', 'python3']) {
   if (!commandExists(command)) errors.push('binary tidak ditemukan: ' + command);
+}
+if (commandExists('python3')) {
+  try {
+    execFileSync('python3', ['-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 2)'], { stdio: 'ignore' });
+  } catch {
+    errors.push('Python >= 3.9 diperlukan untuk project assistant tools');
+  }
 }
 
 if (!existsSync(envPath)) {

@@ -59,7 +59,7 @@ esac
 command -v sudo >/dev/null 2>&1 || { echo "sudo diperlukan untuk setup system dependency/service" >&2; exit 2; }
 SUDO=(sudo -n)
 
-for cmd in node npm git systemctl curl find stat sed awk grep; do
+for cmd in node npm git systemctl curl find stat sed awk grep python3; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "binary wajib tidak ditemukan: $cmd" >&2; exit 2; }
 done
 

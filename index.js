@@ -14,6 +14,7 @@ import { Client } from 'ssh2';
 import SftpClient from 'ssh2-sftp-client';
 import {
   CHAT_WORKFLOW_INSTRUCTIONS,
+  PROJECT_ASSISTANT_INSTRUCTIONS,
   assertAbsolutePath,
   assertCheckpointId,
   buildRepoSnapshotCommand,
@@ -38,6 +39,7 @@ import {
 import { normalizeAllowedBrowserHosts, runBrowserSmoke } from './browser-smoke.js';
 import { assertWorkspaceId, normalizeWorkspaceTasks, normalizeWorkspaceManifest } from './workspace-tools.js';
 import { assertProjectId, normalizeProjectProfile, updateProjectProfile } from './project-profile.js';
+import { assistantTools, createAssistantHandler } from './assistant-tools.js';
 import {
   assertAgentBoardId,
   createAgentBoardState,
@@ -62,7 +64,7 @@ try {
   });
 } catch {}
 
-const MCP_VERSION = '3.10.0';
+const MCP_VERSION = '3.11.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'http://127.0.0.1:3100';
@@ -1403,16 +1405,26 @@ function recordFailedAttempt(ip) {
 
 function resetAttempts(ip) { failedAttempts.delete(ip); }
 
+const handleAssistant = createAssistantHandler({
+  readProject: readProjectProfile,
+  exec: workflowExec,
+  checkCommand(connectionId, command, whitelist, blacklist) {
+    const acl = getWorkflowAcl(connectionId, whitelist, blacklist);
+    checkAcl(command, acl.whitelist, acl.blacklist);
+  }
+});
+
 function createServer(sshDefaultConfig) {
   const server = new Server(
     { name: 'vps2-mcp', version: MCP_VERSION },
-    { capabilities: { tools: {}, ...(sharedBrowser ? {resources:{}} : {}) }, instructions: CHAT_WORKFLOW_INSTRUCTIONS }
+    { capabilities: { tools: {}, ...(sharedBrowser ? {resources:{}} : {}) }, instructions: CHAT_WORKFLOW_INSTRUCTIONS + ' ' + PROJECT_ASSISTANT_INSTRUCTIONS }
   );
 
   if (sharedBrowser) registerBrowserResources(server, sharedBrowser.issueLink, BASE_URL);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       ...(sharedBrowser ? sharedBrowserTools : []),
+      ...assistantTools,
       {
         name: 'ssh_connect',
         description: sshDefaultConfig
@@ -1907,6 +1919,15 @@ function createServer(sshDefaultConfig) {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     if (sharedBrowser && sharedBrowserTools.some(tool => tool.name === name)) return handleBrowserTool(name, args || {}, sharedBrowser.issueLink);
+
+    if (assistantTools.some(tool => tool.name === name)) {
+      try {
+        const result = await handleAssistant(name, args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { isError: true, content: [{ type: 'text', text: 'Project Assistant Error: ' + err.message }] };
+      }
+    }
 
     if (name === 'ssh_connect') {
       try {
@@ -2532,7 +2553,7 @@ document.getElementById('upload').onclick=async()=>{
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
-    tools: [...(sharedBrowser ? sharedBrowserTools.map(tool => tool.name) : []), 'ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_project', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: [...(sharedBrowser ? sharedBrowserTools.map(tool => tool.name) : []), ...assistantTools.map(tool => tool.name), 'ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_project', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 
