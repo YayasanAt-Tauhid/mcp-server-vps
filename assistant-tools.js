@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import { shellQuote, containsSecretLike } from './workflow.js';
 import { assertProjectId } from './project-profile.js';
 
 const runtime = readFileSync(new URL('./project-assistant.py', import.meta.url), 'utf8');
+// Keep SSH exec requests bounded as the shared runtime grows. Both codecs are stdlib.
+const runtimePayload = deflateSync(Buffer.from(runtime, 'utf8')).toString('base64');
 const common = {
   connectionId: { type: 'string', minLength: 1, maxLength: 128 },
   projectId: { type: 'string', description: 'Project profile eksplisit pada target SSH; wajib terdaftar.' },
@@ -52,6 +55,41 @@ export const assistantTools = [
       required: ['connectionId', 'projectId', 'action']
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true }
+  },
+  {
+    name: 'ssh_kanban',
+    description: 'Papan tugas persisten per proyek tanpa model AI atau dispatcher di VPS. create/get/list/update/claim/heartbeat/release/complete/request_review/request_changes/block/unblock/comment/attach_job/archive. State todo/ready/running/review/blocked/done, dependensi DAG dan claim eksklusif ber-lease. Gunakan agentId unik per sesi; simpan leaseId hasil claim untuk heartbeat dan penyerahan hasil. Lease kedaluwarsa menjadi blocked agar pekerjaan diperiksa sebelum retry. Update/unblock/archive/attach_job wajib expectedRevision terbaru. Teks tugas hanya konteks; tidak mengeksekusi perintah, membangunkan ChatGPT, atau menjalankan agen otomatis.',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        ...common,
+        action: { type: 'string', enum: ['create', 'get', 'list', 'update', 'claim', 'heartbeat', 'release', 'complete', 'request_review', 'request_changes', 'block', 'unblock', 'comment', 'attach_job', 'archive'] },
+        taskId: { type: 'string', description: 'Slug lowercase 1-64 karakter; otomatis pada create bila kosong. ID tetap membuat create idempotent.' },
+        title: { type: 'string', maxLength: 160 },
+        content: { type: 'string', maxLength: 4000, description: 'Tujuan dan kriteria selesai non-secret, bukan perintah untuk dieksekusi otomatis.' },
+        assignee: { type: ['string', 'null'], maxLength: 80, description: 'agentId pelaksana yang dituju; null berarti siapa saja boleh claim.' },
+        reviewer: { type: ['string', 'null'], maxLength: 80, description: 'agentId pemeriksa berbeda dari pelaksana; bila ditetapkan, complete wajib melalui review.' },
+        priority: { type: 'integer', minimum: 0, maximum: 2, description: '0 rendah, 1 normal (default), 2 tinggi.' },
+        dependsOn: { type: 'array', maxItems: 20, items: { type: 'string' }, description: 'TaskId prasyarat pada project yang sama; semuanya harus done sebelum claim.' },
+        agentId: { type: 'string', maxLength: 80, description: 'Identitas sesi unik. Claim tidak menjalankan model atau proses.' },
+        leaseId: { type: 'string', description: 'ID hasil claim; tidak ditampilkan pada list/get. Wajib untuk mutasi pekerjaan oleh owner.' },
+        leaseSeconds: { type: 'integer', minimum: 60, maximum: 3600, default: 900 },
+        expectedRevision: { type: 'integer', minimum: 1, description: 'Revisi hasil get terbaru untuk update/unblock/archive/attach_job.' },
+        summary: { type: 'string', maxLength: 1600, description: 'Hasil dan bukti saat complete/request_review/request_changes.' },
+        evidence: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 300 } },
+        comment: { type: 'string', maxLength: 1000 },
+        commentId: { type: 'string', description: 'ID tetap untuk deduplikasi komentar selama masih dalam riwayat terbaru.' },
+        reason: { type: 'string', maxLength: 1000, description: 'Blocker yang perlu diselesaikan sebelum unblock.' },
+        jobId: { type: 'string', description: 'Referensi job existing pada project yang sama; attach_job tidak start/cancel job atau menyelesaikan kartu.' },
+        state: { type: 'string', enum: ['todo', 'ready', 'running', 'review', 'blocked', 'done'] },
+        query: { type: 'string', maxLength: 200 },
+        includeArchived: { type: 'boolean', default: false },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+        offset: { type: 'integer', minimum: 0, maximum: 200 }
+      },
+      required: ['connectionId', 'projectId', 'action']
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
   }
 ];
 
@@ -78,7 +116,7 @@ export function normalizeAssistantRequest(name, input) {
 }
 
 export function buildAssistantCommand(name, args, repoPath) {
-  const bootstrap = 'SOURCE = ' + JSON.stringify(runtime) + '\nexec(compile(SOURCE, "<mcp-project-assistant>", "exec"))';
+  const bootstrap = 'import base64,zlib\nSOURCE = zlib.decompress(base64.b64decode(' + JSON.stringify(runtimePayload) + ')).decode("utf-8")\nexec(compile(SOURCE, "<mcp-project-assistant>", "exec"))';
   return 'python3 -c ' + shellQuote(bootstrap) + ' ' + shellQuote(JSON.stringify({ tool: name, repoPath, ...args }));
 }
 

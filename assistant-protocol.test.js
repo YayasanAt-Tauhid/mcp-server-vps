@@ -64,7 +64,7 @@ test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'clien
     transport.stderr?.on('data', () => {});
     client = new Client({ name: 'assistant-protocol-test', version: '1.0.0' });
     await client.connect(transport);
-    assert.equal(client.getServerVersion().version, '3.11.0');
+    assert.equal(client.getServerVersion().version, '3.12.0');
     const response = await client.callTool({ name: 'ssh_connect', arguments: { connectionId, host: '127.0.0.1', port, username: 'smoke', password: pass } });
     assert.match(response.content[0].text, /Berhasil terhubung/);
   }
@@ -82,7 +82,7 @@ test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'clien
   });
   await connect();
   const tools = await client.listTools();
-  for (const name of ['ssh_memory', 'ssh_skill', 'ssh_job']) assert.ok(tools.tools.some(tool => tool.name === name));
+  for (const name of ['ssh_memory', 'ssh_skill', 'ssh_job', 'ssh_kanban']) assert.ok(tools.tools.some(tool => tool.name === name));
   assert.equal((await call('ssh_memory', { action: 'save', memoryId: 'runtime', title: 'Runtime', content: 'Protocol verified', expectedRevision: 0 })).entry.revision, 1);
   assert.equal((await call('ssh_memory', { action: 'search', query: 'protocol' })).items[0].memoryId, 'runtime');
   const conflict = await client.callTool({ name: 'ssh_memory', arguments: { connectionId, projectId: 'smoke', action: 'save', memoryId: 'runtime', title: 'Stale', content: 'Must fail', expectedRevision: 0 } });
@@ -91,10 +91,20 @@ test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'clien
   await call('ssh_skill', { action: 'save', skillId: 'inspect', title: 'Inspect', content: 'Inspect source before changes.' });
   assert.equal((await call('ssh_skill', { action: 'get', skillId: 'inspect' })).entry.content, 'Inspect source before changes.');
   await call('ssh_job', { action: 'start', jobId: 'restart', command: "sleep 2; printf 'survived-mcp-restart\\n'" });
+  await call('ssh_kanban', { action: 'create', taskId: 'pipeline', title: 'Verify deployment', assignee: 'developer', reviewer: 'reviewer' });
+  await call('ssh_kanban', { action: 'create', taskId: 'dependent', title: 'Continue after approval', dependsOn: ['pipeline'] });
+  const claimed = (await call('ssh_kanban', { action: 'claim', taskId: 'pipeline', agentId: 'developer' })).task;
   await client.callTool({ name: 'ssh_disconnect', arguments: { connectionId } });
   await client.close();
   await connect();
   assert.equal((await call('ssh_memory', { action: 'get', memoryId: 'runtime' })).entry.revision, 1);
+  const persisted = (await call('ssh_kanban', { action: 'get', taskId: 'pipeline' })).task;
+  assert.equal(persisted.owner, 'developer');
+  assert.equal(persisted.leaseId, undefined);
+  await call('ssh_kanban', { action: 'request_review', taskId: 'pipeline', agentId: 'developer', leaseId: claimed.leaseId, summary: 'Verified through reconnect' });
+  const reviewer = (await call('ssh_kanban', { action: 'claim', taskId: 'pipeline', agentId: 'reviewer' })).task;
+  assert.equal((await call('ssh_kanban', { action: 'complete', taskId: 'pipeline', agentId: 'reviewer', leaseId: reviewer.leaseId, summary: 'Approved' })).task.state, 'done');
+  assert.equal((await call('ssh_kanban', { action: 'get', taskId: 'dependent' })).task.state, 'ready');
   const deadline = Date.now() + 9000;
   let job;
   do {
@@ -106,4 +116,6 @@ test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'clien
   assert.equal(job.state, 'succeeded');
   assert.equal(job.exitCode, 0);
   assert.match((await call('ssh_job', { action: 'logs', jobId: 'restart' })).output, /survived-mcp-restart/);
+  const dependent = (await call('ssh_kanban', { action: 'get', taskId: 'dependent' })).task;
+  assert.deepEqual((await call('ssh_kanban', { action: 'attach_job', taskId: 'dependent', expectedRevision: dependent.revision, jobId: 'restart' })).task.jobIds, ['restart']);
 });

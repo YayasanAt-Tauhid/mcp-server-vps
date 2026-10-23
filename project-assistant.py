@@ -513,15 +513,400 @@ def run_worker(target):
             write_json(target / "job.json", job)
 
 
+MAX_KANBAN_TASKS = 200
+KANBAN_STATES = {"todo", "running", "review", "blocked", "done"}
+KANBAN_FIELDS = {"version", "kind", "projectId", "taskId", "title", "content", "assignee", "reviewer",
+                 "priority", "dependsOn", "state", "revision", "createdAt", "updatedAt", "createHash",
+                 "owner", "leaseId", "leaseUntil", "blockedFrom", "reason", "result", "jobIds", "archived",
+                 "comments", "events", "droppedComments", "droppedEvents"}
+
+
+def kanban_actor(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}", value):
+        raise ValueError("agentId/assignee/reviewer tidak valid; maksimum 80 karakter")
+    return value
+
+
+def kanban(request):
+    """Project-scoped, transactional metadata; never executes task text or spawns models."""
+    allowed = {"tool", "repoPath", "projectId", "action", "taskId", "title", "content", "assignee", "reviewer",
+               "priority", "dependsOn", "agentId", "leaseId", "leaseSeconds", "expectedRevision", "summary",
+               "evidence", "comment", "commentId", "reason", "state", "limit", "offset", "query", "includeArchived", "jobId"}
+    if set(request) - allowed:
+        raise ValueError("Field Kanban tidak dikenal")
+    actions = {"create", "get", "list", "update", "claim", "heartbeat", "release", "complete", "request_review",
+               "request_changes", "block", "unblock", "comment", "attach_job", "archive"}
+    action = request["action"]
+    if action not in actions:
+        raise ValueError("action Kanban tidak valid")
+    project = slug(request["projectId"], "projectId")
+    folder = directory(project_dir(project) / "kanban")
+    moment = now()
+    clock = int(time.time() * 1000)
+
+    def spec(source, current=None):
+        current = current or {}
+        value = {}
+        for key, maximum, multiline in [("title", 160, False), ("content", 4000, True)]:
+            raw = source.get(key, current.get(key, ""))
+            value[key] = "" if key == "content" and raw == "" else text(raw, key, maximum, multiline)
+        for key in ("assignee", "reviewer"):
+            raw = source.get(key, current.get(key))
+            value[key] = kanban_actor(raw) if raw is not None else None
+        if value["reviewer"] is not None and value["reviewer"] == value["assignee"]:
+            raise ValueError("Reviewer harus berbeda dari assignee")
+        value["priority"] = integer(source.get("priority", current.get("priority", 1)), "priority", 0, 2)
+        deps = source.get("dependsOn", current.get("dependsOn", []))
+        if not isinstance(deps, list) or len(deps) > 20:
+            raise ValueError("dependsOn maksimum 20 taskId")
+        value["dependsOn"] = sorted(set(slug(dep, "dependsOn") for dep in deps))
+        return value
+
+    def validate_task(task, path):
+        if set(task) != KANBAN_FIELDS or task.get("version") != 1 or task.get("kind") != "kanban":
+            raise ValueError("Schema task Kanban tidak valid")
+        if task.get("projectId") != project or slug(task.get("taskId"), "taskId") != path.stem:
+            raise ValueError("Identitas task Kanban tidak sesuai")
+        if spec(task) != {key: task[key] for key in ("title", "content", "assignee", "reviewer", "priority", "dependsOn")}:
+            raise ValueError("Spesifikasi task Kanban tidak valid")
+        integer(task["revision"], "revision", 1, 2147483647)
+        if task["state"] not in KANBAN_STATES or type(task["archived"]) is not bool:
+            raise ValueError("State task Kanban tidak valid")
+        if task["archived"] and task["state"] != "done":
+            raise ValueError("Arsip task Kanban tidak valid")
+        for key in ("createdAt", "updatedAt"):
+            datetime.datetime.fromisoformat(task[key])
+        if not isinstance(task["createHash"], str) or not re.fullmatch(r"[0-9a-f]{64}", task["createHash"]):
+            raise ValueError("Identitas create Kanban tidak valid")
+        if task["owner"] is not None:
+            kanban_actor(task["owner"])
+            if task["state"] not in {"running", "review"}:
+                raise ValueError("Lease task Kanban tidak valid")
+            if not isinstance(task["leaseId"], str) or not re.fullmatch(r"[0-9a-f]{32}", task["leaseId"]):
+                raise ValueError("Lease ID task Kanban tidak valid")
+            integer(task["leaseUntil"], "leaseUntil", 1, 9007199254740991)
+        elif task["leaseId"] is not None or task["leaseUntil"] is not None or task["state"] == "running":
+            raise ValueError("Owner task Kanban tidak valid")
+        if task["blockedFrom"] not in {None, "work", "review"} or (task["state"] == "blocked") != (task["blockedFrom"] is not None):
+            raise ValueError("Status blok task Kanban tidak valid")
+        if task["reason"] is not None:
+            text(task["reason"], "reason", 1000, True)
+        if not isinstance(task["jobIds"], list) or len(task["jobIds"]) > 10:
+            raise ValueError("Job references tidak valid")
+        for job_id in task["jobIds"]:
+            slug(job_id, "jobId")
+        for key, maximum in [("comments", 20), ("events", 40)]:
+            if not isinstance(task[key], list) or len(task[key]) > maximum:
+                raise ValueError("Riwayat Kanban tidak valid")
+        for item in task["comments"]:
+            if not isinstance(item, dict) or set(item) != {"commentId", "agentId", "content", "at"}:
+                raise ValueError("Komentar Kanban tidak valid")
+            slug(item["commentId"], "commentId")
+            kanban_actor(item["agentId"])
+            text(item["content"], "comment", 1000, True)
+            datetime.datetime.fromisoformat(item["at"])
+        for event in task["events"]:
+            if not isinstance(event, dict) or set(event) != {"action", "agentId", "at", "revision"}:
+                raise ValueError("Event Kanban tidak valid")
+            if event["action"] not in actions | {"lease_expired"}:
+                raise ValueError("Action riwayat Kanban tidak valid")
+            if event["agentId"] is not None:
+                kanban_actor(event["agentId"])
+            datetime.datetime.fromisoformat(event["at"])
+            integer(event["revision"], "event revision", 1, task["revision"])
+        for key in ("droppedComments", "droppedEvents"):
+            integer(task[key], key, 0, 2147483647)
+        result = task["result"]
+        if result is not None:
+            if not isinstance(result, dict) or set(result) != {"summary", "evidence", "submittedBy", "at", "reviewedBy", "reviewSummary", "reviewEvidence", "status"}:
+                raise ValueError("Handoff Kanban tidak valid")
+            text(result["summary"], "summary", 1600, True)
+            kanban_actor(result["submittedBy"])
+            datetime.datetime.fromisoformat(result["at"])
+            if result["status"] not in {"pending_review", "changes_requested", "completed"}:
+                raise ValueError("Status handoff tidak valid")
+            for key in ("evidence", "reviewEvidence"):
+                evidence(result[key])
+            if result["reviewedBy"] is not None:
+                kanban_actor(result["reviewedBy"])
+                text(result["reviewSummary"], "reviewSummary", 1600, True)
+        if task["state"] in {"review", "done"} and (result is None or result["status"] != ("pending_review" if task["state"] == "review" else "completed")):
+            raise ValueError("Handoff tidak cocok dengan state Kanban")
+        if SENSITIVE.search(json.dumps(task, ensure_ascii=False)):
+            raise ValueError("Task berisi pola credential/secret")
+
+    def evidence(value):
+        if not isinstance(value, list) or len(value) > 10:
+            raise ValueError("evidence maksimum 10 item")
+        return [text(item, "evidence", 300, True) for item in value]
+
+    def dependencies(task):
+        return all(records[dep]["state"] == "done" for dep in task["dependsOn"])
+
+    def check_graph(proposed):
+        visiting, visited = set(), set()
+
+        def visit(task_id):
+            if task_id in visited:
+                return
+            if task_id in visiting:
+                raise ValueError("Dependency Kanban membentuk cycle")
+            if task_id not in proposed:
+                raise ValueError("Dependency tidak ditemukan pada project yang sama")
+            visiting.add(task_id)
+            for dep in proposed[task_id]["dependsOn"]:
+                visit(dep)
+            visiting.remove(task_id)
+            visited.add(task_id)
+
+        for task_id in proposed:
+            visit(task_id)
+
+    def public(task, full=False, lease=False):
+        keys = ["taskId", "projectId", "title", "state", "assignee", "reviewer", "priority", "dependsOn", "revision",
+                "createdAt", "updatedAt", "owner", "leaseUntil", "reason", "archived", "jobIds"]
+        value = {key: task[key] for key in keys}
+        if task["state"] == "todo" and dependencies(task):
+            value["state"] = "ready"
+        if full:
+            value.update({key: task[key] for key in ("content", "result", "comments", "events", "droppedComments", "droppedEvents")})
+            value["parents"] = [{"taskId": dep, "state": records[dep]["state"], "title": records[dep]["title"],
+                                 "summary": (records[dep]["result"] or {}).get("summary", "")[:300]} for dep in task["dependsOn"]]
+        if lease:
+            value["leaseId"] = task["leaseId"]
+        return value
+
+    def persist(task, event, actor=None):
+        task["revision"] += 1
+        task["updatedAt"] = moment
+        task["events"].append({"action": event, "agentId": actor, "at": moment, "revision": task["revision"]})
+        for key, counter, maximum in [("comments", "droppedComments", 20), ("events", "droppedEvents", 40)]:
+            overflow = max(0, len(task[key]) - maximum)
+            task[key] = task[key][overflow:]
+            task[counter] += overflow
+        while len(json.dumps(task, ensure_ascii=False).encode()) > MAX_RECORD_BYTES - 100 and (task["comments"] or len(task["events"]) > 1):
+            key, counter = ("comments", "droppedComments") if task["comments"] else ("events", "droppedEvents")
+            task[key].pop(0)
+            task[counter] += 1
+        validate_task(task, folder / (task["taskId"] + ".json"))
+        write_json(folder / (task["taskId"] + ".json"), task)
+
+    def clear_lease(task):
+        task.update(owner=None, leaseId=None, leaseUntil=None)
+
+    def revision(task):
+        expected = integer(request.get("expectedRevision"), "expectedRevision", 1, 2147483647)
+        if expected != task["revision"]:
+            raise ValueError("REVISION_CONFLICT: baca revisi terbaru sebelum perubahan Kanban")
+
+    def require_owner(task):
+        actor = kanban_actor(request.get("agentId"))
+        if task["owner"] != actor or task["leaseId"] != request.get("leaseId") or task["leaseUntil"] is None or task["leaseUntil"] <= clock:
+            raise ValueError("LEASE_CONFLICT: claim aktif dan leaseId milik sesi ini diperlukan")
+        return actor
+
+    with locked(folder):
+        paths = sorted(folder.glob("*.json"))
+        if len(paths) > MAX_KANBAN_TASKS:
+            raise ValueError("Batas 200 task Kanban per project terlampaui")
+        records = {}
+        for path in paths:
+            task = read_json(path)
+            validate_task(task, path)
+            records[task["taskId"]] = task
+        check_graph(records)
+        moment = now()
+        clock = int(time.time() * 1000)
+        for task in records.values():
+            if task["owner"] is not None and task["leaseUntil"] <= clock:
+                owner = task["owner"]
+                task.update(blockedFrom="review" if task["state"] == "review" else "work", state="blocked",
+                            reason="Lease expired; periksa pekerjaan/job yang masih berjalan sebelum unblock")
+                clear_lease(task)
+                persist(task, "lease_expired", owner)
+
+        if action == "create":
+            task_id = slug(request.get("taskId") or "task-" + uuid.uuid4().hex[:20], "taskId")
+            fields = spec(request)
+            digest = hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            if task_id in records:
+                if records[task_id]["createHash"] != digest:
+                    raise ValueError("TASK_ID_CONFLICT: ID sudah digunakan untuk tugas berbeda")
+                return {"task": public(records[task_id], True), "reused": True}
+            if len(records) >= MAX_KANBAN_TASKS:
+                raise ValueError("Maksimum 200 task Kanban per project termasuk arsip")
+            task = {"version": 1, "kind": "kanban", "projectId": project, "taskId": task_id, **fields,
+                    "state": "todo", "revision": 0, "createdAt": moment, "updatedAt": moment, "createHash": digest,
+                    "owner": None, "leaseId": None, "leaseUntil": None, "blockedFrom": None, "reason": None,
+                    "result": None, "jobIds": [], "archived": False, "comments": [], "events": [],
+                    "droppedComments": 0, "droppedEvents": 0}
+            check_graph(records | {task_id: task})
+            records[task_id] = task
+            persist(task, action, kanban_actor(request["agentId"]) if request.get("agentId") is not None else None)
+            return {"task": public(task, True), "reused": False}
+
+        if action == "list":
+            limit = integer(request.get("limit", 20), "limit", 1, 50)
+            offset = integer(request.get("offset", 0), "offset", 0, MAX_KANBAN_TASKS)
+            include_archived = request.get("includeArchived", False)
+            if type(include_archived) is not bool:
+                raise ValueError("includeArchived harus boolean")
+            items = [public(task) for task in records.values() if include_archived or not task["archived"]]
+            counts = {state: sum(item["state"] == state for item in items) for state in ("todo", "ready", "running", "review", "blocked", "done")}
+            if "state" in request:
+                if request["state"] not in counts:
+                    raise ValueError("Filter state tidak valid")
+                items = [item for item in items if item["state"] == request["state"]]
+            if request.get("assignee") is not None:
+                actor = kanban_actor(request["assignee"])
+                items = [item for item in items if actor in (item["assignee"], item["reviewer"], item["owner"])]
+            if request.get("query") is not None:
+                terms = re.findall(r"\w+", fold(text(request["query"], "query", 200)))
+                if not 1 <= len(terms) <= 12:
+                    raise ValueError("Query memerlukan 1-12 kata")
+                items = [item for item in items if all(term in fold(item["title"] + "\n" + records[item["taskId"]]["content"]) for term in terms)]
+            items.sort(key=lambda item: (-item["priority"], item["createdAt"], item["taskId"]))
+            end = offset + limit
+            return {"items": items[offset:end], "counts": counts, "total": len(items), "limit": limit,
+                    "offset": offset, "nextOffset": end if end < len(items) else None}
+
+        task_id = request.get("taskId")
+        if action == "claim" and task_id is None:
+            actor = kanban_actor(request.get("agentId"))
+            candidates = [task for task in records.values() if not task["archived"] and task["owner"] is None and
+                          ((task["state"] == "todo" and dependencies(task) and task["assignee"] in (None, actor)) or
+                           (task["state"] == "review" and task["reviewer"] == actor))]
+            candidates.sort(key=lambda task: (-task["priority"], task["createdAt"], task["taskId"]))
+            if not candidates:
+                raise ValueError("Tidak ada task ready/review yang cocok dengan agentId")
+            task_id = candidates[0]["taskId"]
+        task_id = slug(task_id, "taskId")
+        if task_id not in records:
+            raise ValueError("Task tidak ditemukan pada project ini")
+        task = records[task_id]
+        if action == "get":
+            return {"task": public(task, True)}
+        if task["archived"]:
+            raise ValueError("Task sudah diarsipkan")
+
+        actor = kanban_actor(request["agentId"]) if request.get("agentId") is not None else None
+        reveal_lease = False
+        if action == "claim":
+            actor = kanban_actor(request.get("agentId"))
+            if any(item["owner"] == actor for item in records.values()):
+                raise ValueError("Agent masih memiliki claim aktif pada project ini")
+            reviewer = task["state"] == "review"
+            if task["owner"] is not None or task["state"] not in {"todo", "review"} or not dependencies(task):
+                raise ValueError("Task belum ready atau sudah di-claim/selesai/terblokir")
+            if (task["reviewer"] if reviewer else task["assignee"]) not in (None, actor):
+                raise ValueError("Task ditugaskan kepada agent lain")
+            if reviewer and task["result"]["submittedBy"] == actor:
+                raise ValueError("Reviewer harus berbeda dari pelaksana")
+            lease = integer(request.get("leaseSeconds", 900), "leaseSeconds", 60, 3600)
+            task.update(state="review" if reviewer else "running", owner=actor, leaseId=uuid.uuid4().hex,
+                        leaseUntil=clock + lease * 1000, reason=None)
+            reveal_lease = True
+        elif action == "update":
+            revision(task)
+            if task["state"] not in {"todo", "blocked"} or task["blockedFrom"] == "review":
+                raise ValueError("Update hanya untuk task antrean atau blocked work")
+            candidate = {**task, **spec(request, task)}
+            check_graph(records | {task_id: candidate})
+            task.update(candidate)
+        elif action == "comment":
+            actor = kanban_actor(request.get("agentId"))
+            content = text(request.get("comment"), "comment", 1000, True)
+            comment_id = slug(request.get("commentId") or "comment-" + uuid.uuid4().hex[:16], "commentId")
+            existing = next((item for item in task["comments"] if item["commentId"] == comment_id), None)
+            if existing:
+                if existing["content"] != content or existing["agentId"] != actor:
+                    raise ValueError("COMMENT_ID_CONFLICT")
+                return {"task": public(task, True), "reused": True}
+            task["comments"].append({"commentId": comment_id, "agentId": actor, "content": content, "at": moment})
+        elif action in {"unblock", "archive", "attach_job"}:
+            revision(task)
+            if action == "unblock":
+                if task["state"] != "blocked":
+                    raise ValueError("Hanya task blocked dapat di-unblock")
+                task.update(state="review" if task["blockedFrom"] == "review" else "todo", blockedFrom=None, reason=None)
+            elif action == "archive":
+                if task["state"] != "done":
+                    raise ValueError("Hanya task done dapat diarsipkan")
+                task["archived"] = True
+            else:
+                if task["owner"] is not None:
+                    actor = require_owner(task)
+                job_id = slug(request.get("jobId"), "jobId")
+                jobs_folder = project_dir(project) / "jobs"
+                target = jobs_folder / job_id
+                for existing in (jobs_folder, target):
+                    info = existing.lstat()
+                    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                        raise ValueError("Direktori job tidak aman")
+                job = load_job(target)
+                if job["projectId"] != project:
+                    raise ValueError("Project job tidak cocok")
+                if job_id not in task["jobIds"]:
+                    if len(task["jobIds"]) >= 10:
+                        raise ValueError("Maksimum 10 job references")
+                    task["jobIds"].append(job_id)
+        else:
+            actor = require_owner(task)
+            is_review = task["state"] == "review"
+            if action == "heartbeat":
+                lease = integer(request.get("leaseSeconds", 900), "leaseSeconds", 60, 3600)
+                task["leaseUntil"] = clock + lease * 1000
+                reveal_lease = True
+            elif action == "release":
+                task.update(state="review" if is_review else "todo", reason=None)
+                clear_lease(task)
+            elif action == "block":
+                task.update(state="blocked", blockedFrom="review" if is_review else "work",
+                            reason=text(request.get("reason"), "reason", 1000, True))
+                clear_lease(task)
+            elif action in {"complete", "request_review", "request_changes"}:
+                summary = text(request.get("summary"), "summary", 1600, True)
+                proof = evidence(request.get("evidence", []))
+                if action == "request_changes":
+                    if not is_review:
+                        raise ValueError("request_changes hanya dari reviewer dengan claim aktif")
+                    task["result"].update(reviewedBy=actor, reviewSummary=summary, reviewEvidence=proof, status="changes_requested")
+                    task.update(state="todo", reason=summary)
+                elif action == "request_review":
+                    if is_review:
+                        raise ValueError("Task sudah dalam review")
+                    reviewer = kanban_actor(request.get("reviewer") or task["reviewer"])
+                    if task["reviewer"] is not None and task["reviewer"] != reviewer:
+                        raise ValueError("Reviewer yang sudah ditetapkan tidak boleh diganti saat handoff")
+                    if reviewer == actor:
+                        raise ValueError("Reviewer harus berbeda dari pelaksana")
+                    task.update(state="review", reviewer=reviewer, result={"summary": summary, "evidence": proof,
+                                "submittedBy": actor, "at": moment, "reviewedBy": None, "reviewSummary": None,
+                                "reviewEvidence": [], "status": "pending_review"})
+                else:
+                    if not is_review and task["reviewer"] is not None:
+                        raise ValueError("Task memerlukan request_review dan persetujuan reviewer")
+                    if is_review:
+                        task["result"].update(reviewedBy=actor, reviewSummary=summary, reviewEvidence=proof, status="completed")
+                    else:
+                        task["result"] = {"summary": summary, "evidence": proof, "submittedBy": actor, "at": moment,
+                                          "reviewedBy": None, "reviewSummary": None, "reviewEvidence": [], "status": "completed"}
+                    task.update(state="done", reason=None)
+                clear_lease(task)
+        persist(task, action, actor)
+        return {"task": public(task, True, reveal_lease)}
+
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--worker":
         run_worker(Path(sys.argv[2]))
     else:
         try:
             request = json.loads(sys.argv[1])
-            if request.get("tool") not in {"ssh_memory", "ssh_skill", "ssh_job"}:
+            if request.get("tool") not in {"ssh_memory", "ssh_skill", "ssh_job", "ssh_kanban"}:
                 raise ValueError("Tool tidak dikenal")
-            result = jobs(request) if request["tool"] == "ssh_job" else knowledge(request)
+            result = kanban(request) if request["tool"] == "ssh_kanban" else jobs(request) if request["tool"] == "ssh_job" else knowledge(request)
             print(json.dumps({"ok": True, **result}, ensure_ascii=False))
         except (ValueError, OSError, KeyError, TypeError) as error:
             # No traceback or command output: persisted data may be sensitive.

@@ -1,6 +1,6 @@
-# Project assistant tools — 3.11.0
+# Project assistant tools — 3.12.0
 
-Tiga tools tambahan memakai Python >= 3.9 standar pada target SSH Linux. Tidak ada model AI, vector database, embedding, dependency Python tambahan, atau daemon baru saat idle. ChatGPT memilih tools dan menafsirkan hasilnya. Tools lama tetap tersedia.
+Tools memori, prosedur, jobs (sejak 3.11.0) dan Kanban (3.12.0) memakai Python >= 3.9 standar pada target SSH Linux. Tidak ada model AI, vector database, embedding, dependency Python tambahan, atau daemon baru saat idle. ChatGPT memilih tools dan menafsirkan hasilnya. Panduan papan tugas per proyek: `KANBAN_TOOLS.md`. Tools lama tetap tersedia.
 
 ## Project context
 
@@ -54,4 +54,4 @@ Jalankan `node --test assistant-tools.test.js` pada Linux dengan `/proc` nyata. 
 
 `assistant-protocol.test.js` menguji tools melalui MCP dan SSH terautentikasi pada listener loopback sementara dengan credential acak hanya di memori. Mode default benar-benar menghentikan dan memulai proses MCP pengujian untuk membuktikan durability. Untuk smoke HTTP deployment, set `MCP_ASSISTANT_SMOKE_URL=http://127.0.0.1:3100/` dan `MCP_ASSISTANT_AUTH_ENV` ke path konfigurasi lokal; mode ini menguji reconnect client pada server aktif dan membaca credential secara lokal tanpa mencetaknya. Data uji memakai home/repo sementara, lalu koneksi SSH uji ditutup.
 
-Setelah aktivasi, health harus melaporkan `3.11.0`; ketika shared browser aktif ada 43 tools. Refresh metadata koneksi/plugin lalu gunakan percakapan baru bila host masih menampilkan daftar lama. Perubahan ini mengikuti lifecycle OAuth/koneksi yang telah ada; restart layanan dapat memerlukan reconnect/authorization ulang pada account.
+Setelah aktivasi, health harus melaporkan `3.12.0`; ketika shared browser aktif ada 44 tools. Refresh metadata koneksi/plugin lalu gunakan percakapan baru bila host masih menampilkan daftar lama. Perubahan ini mengikuti lifecycle OAuth/koneksi yang telah ada; restart layanan dapat memerlukan reconnect/authorization ulang pada account.

@@ -22,6 +22,12 @@ Pada awal pekerjaan, cari catatan relevan melalui `ssh_memory search` dan prosed
 
 Pekerjaan baru yang panjang dapat memakai `ssh_job start`; simpan ID dan gunakan status/logs. Memakai ID yang sama untuk perintah yang sama tidak menjalankan ulang job. Status `interrupted` harus ditinjau sebelum membuat job baru. Prosedur tersimpan tidak otomatis dieksekusi. Lihat `ASSISTANT_TOOLS.md`.
 
+## Kanban proyek — 3.12.0
+
+`ssh_kanban` menambahkan antrean tugas umum per proyek: todo/ready/running/review/blocked/done, assignment, dependensi, komentar, hasil dan referensi `ssh_job`. Refresh metadata lalu mulai percakapan baru untuk memuat tool tersebut. ChatGPT tetap pengendali; claim kartu tidak memulai model atau worker otomatis.
+
+Pada awal sesi, gunakan list/get untuk melihat tujuan dan handoff yang relevan, lalu claim memakai agentId unik sesi. Simpan leaseId untuk heartbeat dan penyerahan hasil. Bila perlu review, gunakan request_review; reviewer berbeda harus claim lalu complete/request_changes. Lease habis menjadi blocked dan perlu pemeriksaan pekerjaan/job aktual sebelum unblock, tanpa menjalankan ulang otomatis. Update/unblock/archive/attach_job memerlukan revisi terbaru. Detail batas, penyimpanan dan contoh action: `KANBAN_TOOLS.md`.
+
 ## Workflow sesi baru
 
 ```text

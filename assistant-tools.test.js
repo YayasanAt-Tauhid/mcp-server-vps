@@ -246,7 +246,7 @@ test('assistant dispatch preserves command ACL checks and explicit project ident
 });
 
 test('tool requests reject unknown fields and generate opaque IDs only for new jobs', () => {
-  assert.deepEqual(assistantTools.map(tool => tool.name), ['ssh_memory', 'ssh_skill', 'ssh_job']);
+  assert.deepEqual(assistantTools.map(tool => tool.name), ['ssh_memory', 'ssh_skill', 'ssh_job', 'ssh_kanban']);
   const base = { connectionId: 'c', projectId: 'demo', action: 'list' };
   assert.throws(() => normalizeAssistantRequest('ssh_memory', { ...base, repoPath: '/outside' }), /Field/);
   assert.throws(() => normalizeAssistantRequest('ssh_memory', { ...base, constructor: 'not-a-schema-field' }), /Field/);

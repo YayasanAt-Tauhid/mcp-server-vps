@@ -25,6 +25,7 @@ Dokumentasi lengkap:
 - `SETUP_NEW_PROJECT.md`
 - `CHATGPT_SETUP.md`
 - `ASSISTANT_TOOLS.md` — memori/skills per proyek dan pekerjaan dengan ID/status persisten (3.11.0).
+- `KANBAN_TOOLS.md` — papan tugas, dependensi, claim, komentar dan review per proyek tanpa model tambahan (3.12.0).
 
 ## Tool project-aware
 

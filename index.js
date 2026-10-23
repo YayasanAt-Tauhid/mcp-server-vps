@@ -64,7 +64,7 @@ try {
   });
 } catch {}
 
-const MCP_VERSION = '3.11.0';
+const MCP_VERSION = '3.12.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'http://127.0.0.1:3100';
