@@ -1,5 +1,7 @@
 # Setup MCP pada VPS Baru
 
+> Hanya ingin menambah VPS ke server MCP yang sudah ada? Lihat [ADD_VPS_TARGET.md](ADD_VPS_TARGET.md): cukup `mcp-target add`, tanpa memasang MCP baru.
+
 Panduan ini mengasumsikan Linux dengan systemd dan user service non-root. Installer sengaja tidak mengambil script remote dan tidak menerima credential sebagai argumen command line.
 
 ## 1. Prasyarat
