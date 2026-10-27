@@ -16,4 +16,4 @@ const [shell, bundle] = await Promise.all([
   readFile('browser-ui-bundle.js', 'utf8'),
 ]);
 if (!shell.includes('/*__BROWSER_UI_BUNDLE__*/')) throw new Error('Bundle placeholder not found');
-await writeFile('browser-ui.html', shell.replace('/*__BROWSER_UI_BUNDLE__*/', bundle));
+await writeFile('browser-ui.html', shell.replace('/*__BROWSER_UI_BUNDLE__*/', () => bundle));

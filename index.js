@@ -1,3 +1,4 @@
+import { LOGIN_TTL_MS, claudeAppDomain } from './browser-embed-security.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -51,8 +52,8 @@ import {
 } from './agent-board.js';
 
 import {
-  browserOpen, browserSnapshot, browserClick, browserType, browserSelect,
-  browserWait, browserScreenshot, browserTabs, browserBack, browserReload, browserSetMode
+  browserOpen, browserSnapshot, browserExtractText, browserExtractTranscript, browserClick, browserType, browserSelect,
+  browserWait, browserScreenshot, browserExportPdf, browserExecuteJs, browserTabs, browserBack, browserReload, browserSetMode
 } from './browser-tools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -69,12 +70,13 @@ const MCP_VERSION = '3.10.0';
 const MCP_TOKEN = process.env.MCP_TOKEN || '';
 const APPROVE_PASSWORD = process.env.APPROVE_PASSWORD || '';
 const BASE_URL = process.env.BASE_URL || 'https://mcp-vps2.hijrah-attauhid.or.id';
-const BROWSER_UI_URI = 'ui://attauhid/browser-card-v1.html';
+const BROWSER_UI_URI = 'ui://attauhid/browser-v9.html';
+const BROWSER_SCREENSHOT_UI_URI = 'ui://attauhid/browser-screenshot-v1.html';
 const BROWSER_UI_URI_RE = /^ui:\/\/attauhid\/(?:browser-v\d+|browser-card-v\d+)\.html$/;
 const BROWSER_VIEW_URL = 'https://browser-vps.hijrah-attauhid.or.id/embed/login';
 function browserViewLink() {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const expires = Date.now() + 600000;
+  const expires = Date.now() + LOGIN_TTL_MS;
   const sig = crypto.createHmac('sha256', APPROVE_PASSWORD).update('browser-view:' + nonce + ':' + expires).digest('hex');
   return BROWSER_VIEW_URL + '?nonce=' + nonce + '&expires=' + expires + '&sig=' + sig;
 }
@@ -1468,6 +1470,8 @@ function createServer(sshDefaultConfig) {
           type: 'object',
           properties: {
             mode: { type: 'string', enum: ['desktop','mobile'], description: 'Mode viewport browser' },
+            width: { type: 'number', minimum: 320, maximum: 640, description: 'Lebar panel mobile (CSS px)' },
+            height: { type: 'number', minimum: 320, maximum: 768, description: 'Tinggi panel mobile (CSS px)' },
             tabIndex: { type: 'number', description: 'Tab tujuan; default tab aktif' }
           },
           required: ['mode']
@@ -1501,6 +1505,38 @@ function createServer(sshDefaultConfig) {
           properties: {
             tabIndex: { type: 'number', description: 'Tab yang dibaca; default tab aktif' },
             limit: { type: 'number', description: 'Batas elemen interaktif, default 120 maksimum 250' }
+          }
+        }
+      },
+      {
+        name: 'browser_extract_text',
+        description: 'Ambil teks halaman secara read-only dari DOM Chromium. Mendukung iframe, open Shadow DOM, auto-scroll opsional, dan pagination untuk halaman sangat panjang.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: { type: 'string', description: 'CSS selector target; default body' },
+            tabIndex: { type: 'number' },
+            includeFrames: { type: 'boolean', description: 'Sertakan iframe; default true' },
+            includeShadowDom: { type: 'boolean', description: 'Sertakan open Shadow DOM; default true' },
+            autoScroll: { type: 'boolean', description: 'Scroll halaman utama untuk memuat lazy content; default false' },
+            maxScrollSteps: { type: 'number', minimum: 1, maximum: 60, description: 'Batas langkah auto-scroll; default 12' },
+            offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default/maksimum 200000 karakter' }
+          }
+        }
+      },
+      {
+        name: 'browser_extract_transcript',
+        description: 'Ambil caption/transkrip yang sudah tampil di DOM browser secara read-only. Tidak merekam audio. Mendukung iframe dan pagination.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: { type: 'string', description: 'Selector khusus transcript/caption; opsional. Jika kosong memakai selector caption/transcript umum.' },
+            tabIndex: { type: 'number' },
+            includeFrames: { type: 'boolean', description: 'Sertakan iframe; default true' },
+            dedupe: { type: 'boolean', description: 'Hapus baris duplikat; default true' },
+            offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default/maksimum 200000 karakter' }
           }
         }
       },
@@ -1578,6 +1614,49 @@ function createServer(sshDefaultConfig) {
             fullPage: { type: 'boolean', description: 'Screenshot seluruh halaman; default false' },
             tabIndex: { type: 'number' }
           }
+        }
+      },
+      {
+        name: 'browser_screenshot_view',
+        description: 'Ambil screenshot PNG dari browser bersama VPS At-Tauhid dan tampilkan sebagai panel gambar MCP App. Gunakan saat client tidak menampilkan MCP image content secara langsung.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            fullPage: { type: 'boolean', description: 'Screenshot seluruh halaman; default false' },
+            format: { type: 'string', enum: ['image','pdf'], description: 'Output panel: image PNG atau pdf; default image' },
+            tabIndex: { type: 'number', description: 'Tab yang diambil; default tab aktif' }
+          }
+        },
+        outputSchema: {
+          type: 'object',
+          properties: {
+            ready: { type: 'boolean' },
+            format: { type: 'string', enum: ['image','pdf'] }
+          },
+          required: ['ready'],
+          additionalProperties: false
+        },
+        _meta: {
+          ui: { resourceUri: BROWSER_SCREENSHOT_UI_URI, visibility: ['model', 'app'] },
+          'ui/resourceUri': BROWSER_SCREENSHOT_UI_URI,
+          'openai/outputTemplate': BROWSER_SCREENSHOT_UI_URI,
+          'openai/toolInvocation/invoking': 'Mengambil screenshot browser…',
+          'openai/toolInvocation/invoked': 'Screenshot browser siap'
+        }
+      },
+      {
+        name: 'browser_execute_js',
+        description: 'Jalankan JavaScript pada halaman Chromium aktif dan kembalikan hasilnya.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            script: { type: 'string' },
+            tabIndex: { type: 'number' },
+            timeoutMs: { type: 'number', description: 'Batas waktu eksekusi; default 10000 ms, maksimum 30000 ms' },
+            offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk per panggilan; default/maksimum 200000 karakter' }
+          },
+          required: ['script']
         }
       },
       {
@@ -2095,25 +2174,58 @@ function createServer(sshDefaultConfig) {
   }));
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-    resources: [{
-      uri: BROWSER_UI_URI,
-      name: 'Browser VPS At-Tauhid',
-      mimeType: 'text/html;profile=mcp-app',
-      _meta: {
-        ui: {
-          prefersBorder: false,
-          csp: {
-            connectDomains: [],
-            resourceDomains: [],
-            frameDomains: ['https://browser-vps.hijrah-attauhid.or.id']
+    resources: [
+      {
+        uri: BROWSER_UI_URI,
+        name: 'Browser VPS At-Tauhid',
+        mimeType: 'text/html;profile=mcp-app',
+        _meta: {
+          'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
+          ui: {
+            ...(/claude/i.test(server.getClientVersion()?.name || '') ? { domain: claudeAppDomain(BASE_URL) } : {}),
+            prefersBorder: false,
+            csp: {
+              connectDomains: [],
+              resourceDomains: [],
+              frameDomains: ['https://browser-vps.hijrah-attauhid.or.id']
+            }
+          }
+        }
+      },
+      {
+        uri: BROWSER_SCREENSHOT_UI_URI,
+        name: 'Screenshot Browser VPS At-Tauhid',
+        mimeType: 'text/html;profile=mcp-app',
+        _meta: {
+          'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
+          ui: {
+            ...(/claude/i.test(server.getClientVersion()?.name || '') ? { domain: claudeAppDomain(BASE_URL) } : {}),
+            prefersBorder: false
           }
         }
       }
-    }]
+    ]
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const requestedUri = request.params.uri;
+    if (requestedUri === BROWSER_SCREENSHOT_UI_URI) {
+      console.error('[UI] resources/read', requestedUri);
+      return { contents: [{
+        uri: requestedUri,
+        mimeType: 'text/html;profile=mcp-app',
+        text: readFileSync(resolve(__dirname, 'browser-screenshot-ui.html'), 'utf8'),
+        _meta: {
+          ui: {
+            ...(/claude/i.test(server.getClientVersion()?.name || '') ? { domain: claudeAppDomain(BASE_URL) } : {}),
+            prefersBorder: false
+          },
+          'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
+          'openai/widgetDescription': 'Screenshot statis dari browser bersama VPS At-Tauhid.',
+          'openai/widgetPrefersBorder': false
+        }
+      }] };
+    }
     if (!BROWSER_UI_URI_RE.test(requestedUri)) throw new Error('Resource tidak ditemukan');
     console.error('[UI] resources/read', requestedUri);
     return { contents: [{
@@ -2122,6 +2234,7 @@ function createServer(sshDefaultConfig) {
       text: readFileSync(resolve(__dirname, 'browser-ui.html'), 'utf8').replace('__BROWSER_VIEW_URL__', browserViewLink()),
       _meta: {
         ui: {
+          ...(/claude/i.test(server.getClientVersion()?.name || '') ? { domain: claudeAppDomain(BASE_URL) } : {}),
           prefersBorder: false,
           csp: {
             connectDomains: [],
@@ -2129,7 +2242,7 @@ function createServer(sshDefaultConfig) {
             frameDomains: ['https://browser-vps.hijrah-attauhid.or.id']
           }
         },
-        'openai/ui': { availableDisplayModes: ['inline'] },
+        'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
         'openai/widgetDescription': 'Browser bersama VPS At-Tauhid yang dapat dikendalikan langsung dari ChatGPT.',
         'openai/widgetPrefersBorder': false,
         'openai/widgetCSP': {
@@ -2201,6 +2314,24 @@ function createServer(sshDefaultConfig) {
       }
     }
 
+    if (name === 'browser_extract_text') {
+      try {
+        const result = await browserExtractText(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Extract Text Error: ' + err.message }], isError: true };
+      }
+    }
+
+    if (name === 'browser_extract_transcript') {
+      try {
+        const result = await browserExtractTranscript(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Extract Transcript Error: ' + err.message }], isError: true };
+      }
+    }
+
     if (name === 'browser_click') {
       try {
         const result = await browserClick(args || {});
@@ -2246,6 +2377,50 @@ function createServer(sshDefaultConfig) {
         ] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Screenshot Error: ' + err.message }] };
+      }
+    }
+
+    if (name === 'browser_screenshot_view') {
+      try {
+        if ((args || {}).format === 'pdf') {
+          const result = await browserExportPdf(args || {});
+          return {
+            structuredContent: { ready: true, format: 'pdf' },
+            content: [{ type: 'text', text: 'PDF browser siap ditampilkan pada panel.' }],
+            _meta: {
+              pdfData: result.pdf,
+              pdfInfo: result.info,
+              ui: { resourceUri: BROWSER_SCREENSHOT_UI_URI },
+              'openai/outputTemplate': BROWSER_SCREENSHOT_UI_URI
+            }
+          };
+        }
+        const result = await browserScreenshot(args || {});
+        return {
+          structuredContent: { ready: true, format: 'image' },
+          content: [{ type: 'text', text: 'Screenshot browser siap ditampilkan pada panel gambar.' }],
+          _meta: {
+            screenshotDataUrl: 'data:image/png;base64,' + result.image,
+            screenshotInfo: result.info,
+            ui: { resourceUri: BROWSER_SCREENSHOT_UI_URI },
+            'openai/outputTemplate': BROWSER_SCREENSHOT_UI_URI
+          }
+        };
+      } catch (err) {
+        return {
+          structuredContent: { ready: false },
+          content: [{ type: 'text', text: 'Browser Screenshot View Error: ' + err.message }],
+          isError: true
+        };
+      }
+    }
+
+    if (name === 'browser_execute_js') {
+      try {
+        const result = await browserExecuteJs(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Execute JS Error: ' + err.message }], isError: true };
       }
     }
 
@@ -2683,12 +2858,56 @@ if (cliArgs.includes('--http')) {
     const tempId = crypto.randomBytes(8).toString('hex');
     authCodes.set('pending_' + tempId, { client_id, redirect_uri, state, code_challenge, code_challenge_method, createdAt: Date.now() });
     res.send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>MCP VPS2 - Izinkan Akses</title>
-<style>body{font-family:sans-serif;max-width:460px;margin:60px auto;padding:20px}h2{color:#333}.info{background:#f5f5f5;padding:12px;border-radius:8px;margin:16px 0;font-size:14px}.field{margin:14px 0}label{display:block;font-size:14px;color:#555;margin-bottom:6px;font-weight:600}input[type=text],input[type=password],input[type=number],textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:15px;box-sizing:border-box;font-family:inherit}textarea{font-family:monospace;font-size:13px;min-height:90px;resize:vertical}.row{display:flex;gap:10px}.row .field{flex:1}.authmethod{display:flex;gap:16px;margin-bottom:10px;font-size:14px;font-weight:normal}.authmethod label{display:flex;align-items:center;gap:6px;font-weight:normal;margin:0}fieldset{border:1px solid #e2e2e2;border-radius:8px;padding:14px;margin:16px 0}legend{font-size:14px;font-weight:600;color:#333;padding:0 6px}button{padding:10px 24px;border:none;border-radius:6px;cursor:pointer;font-size:15px;margin-top:8px}.allow{background:#2563eb;color:white;margin-right:8px}.deny{background:#eee;color:#333}.timer{font-size:12px;color:#999;margin-top:8px}.hint{font-size:12px;color:#888;margin-top:-2px;margin-bottom:8px}</style>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f4f8ff"><title>MCP VPS2 - Izinkan Akses</title>
+<style>
+:root{color-scheme:light;--navy:#10224a;--text:#1e293b;--muted:#64748b;--line:#dbe5f1;--blue:#1769e8;--blue2:#0f5bd8;--soft:#edf5ff;--danger:#dc2626;--danger-soft:#fff1f2}
+*{box-sizing:border-box}
+html{background:#f4f7fb}
+body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(180deg,#edf5ff 0,#f7faff 24%,#f4f7fb 100%);color:var(--text);-webkit-font-smoothing:antialiased}
+.page{width:min(100%,720px);margin:0 auto;padding:22px 16px max(26px,env(safe-area-inset-bottom))}
+.hero{display:flex;align-items:flex-start;gap:14px;padding:4px 2px 8px}
+.hero-icon{flex:0 0 58px;height:58px;border-radius:18px;display:grid;place-items:center;background:linear-gradient(145deg,#dbeafe,#eef6ff);color:var(--blue);font-size:30px;box-shadow:inset 0 0 0 1px rgba(23,105,232,.06)}
+.hero-copy{min-width:0}
+h2{margin:2px 0 6px;color:var(--navy);font-size:clamp(24px,7vw,32px);line-height:1.08;letter-spacing:-.03em}
+.intro{margin:0;color:var(--muted);font-size:15px;line-height:1.45}
+.info{position:relative;background:rgba(237,245,255,.92);border:1px solid #bfdbfe;padding:16px 16px 16px 50px;border-radius:18px;margin:14px 0 18px;font-size:14px;line-height:1.55;box-shadow:0 8px 24px rgba(15,78,155,.05)}
+.info:before{content:"i";position:absolute;left:16px;top:16px;width:25px;height:25px;border-radius:999px;display:grid;place-items:center;background:var(--blue);color:#fff;font-weight:800;font-family:Georgia,serif}
+.info b{display:block;color:var(--navy);font-size:16px;margin-bottom:5px}
+form{margin:0}
+fieldset,.approval-card{border:1px solid var(--line);background:rgba(255,255,255,.96);border-radius:20px;padding:16px;margin:0 0 14px;box-shadow:0 10px 28px rgba(15,35,70,.06)}
+legend{font-size:18px;font-weight:800;color:var(--navy);padding:0 8px}
+.field{margin:13px 0}
+label{display:block;font-size:13px;color:#334155;margin-bottom:7px;font-weight:700}
+input[type=text],input[type=password],input[type=number],textarea{width:100%;min-height:48px;padding:12px 14px;border:1px solid #cfd9e7;border-radius:12px;background:#fff;color:#0f172a;font-size:16px;box-sizing:border-box;font-family:inherit;outline:none;transition:border-color .18s,box-shadow .18s}
+input::placeholder,textarea::placeholder{color:#94a3b8}
+input:focus,textarea:focus{border-color:#70a7f5;box-shadow:0 0 0 4px rgba(37,99,235,.1)}
+textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;min-height:112px;resize:vertical}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 108px;gap:12px}
+.authmethod{display:flex;flex-wrap:wrap;gap:12px 22px;margin:8px 0 4px;font-size:14px}
+.authmethod label{display:flex;align-items:center;gap:8px;font-weight:600;margin:0;color:#334155;cursor:pointer}
+.authmethod input{width:19px;height:19px;accent-color:var(--blue)}
+.approval-title{display:flex;align-items:center;gap:9px;margin:0 0 4px;color:var(--navy);font-size:17px;font-weight:800}
+.approval-card .field{margin:10px 0}
+.hint{font-size:12px;line-height:1.5;color:var(--muted);margin:10px 0 0;padding:10px 12px;border-radius:12px;background:#f8fafc;border:1px solid #e8eef6}
+.actions{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:10px;margin-top:14px}
+button{min-height:50px;padding:12px 16px;border:none;border-radius:13px;cursor:pointer;font-size:16px;font-weight:800;transition:transform .12s,filter .12s,box-shadow .12s}
+button:active{transform:translateY(1px)}
+.allow{background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;box-shadow:0 8px 18px rgba(23,105,232,.22)}
+.deny{background:var(--danger-soft);color:var(--danger);border:1px solid #fecdd3}
+.timer{text-align:center;font-size:13px;color:var(--muted);margin:12px 0 0}
+@media (max-width:380px){.page{padding-left:12px;padding-right:12px}.hero{gap:11px}.hero-icon{flex-basis:50px;height:50px;border-radius:15px;font-size:26px}h2{font-size:23px}.info{padding-left:46px}.row{grid-template-columns:minmax(0,1fr) 92px}.actions{grid-template-columns:1fr 1fr}fieldset,.approval-card{padding:14px}}
+@media (min-width:700px){.page{padding-top:42px}.hero{padding-left:8px}.info{margin-top:18px}}
+</style>
 </head><body>
-<h2>🔐 MCP VPS2 - SSH Server</h2>
-<p>Masukkan detail koneksi SSH dan password untuk mengizinkan akses.</p>
-<div class="info"><b>Akses yang diberikan:</b><br>• Koneksi SSH ke server remote<br>• Eksekusi perintah via SSH<br>• Upload & Download file via SSH<br>• Browse file via SSH<br>• Kontrol browser bersama Chromium (password/OTP/token tidak diisi oleh AI)</div>
+<main class="page">
+<section class="hero">
+  <div class="hero-icon" aria-hidden="true">🔒</div>
+  <div class="hero-copy">
+    <h2>MCP VPS2 - SSH Server</h2>
+    <p class="intro">Masukkan detail koneksi SSH dan password untuk mengizinkan akses.</p>
+  </div>
+</section>
+<div class="info"><b>Akses yang diberikan:</b>• Koneksi SSH ke server remote<br>• Eksekusi perintah via SSH<br>• Upload &amp; Download file via SSH<br>• Browse file via SSH<br>• Kontrol browser bersama Chromium<br><span style="color:#64748b">(password/OTP/token tidak diisi oleh AI)</span></div>
 <form method="POST" action="/oauth/approve">
 <input type="hidden" name="tempId" value="${tempId}">
 <fieldset>
@@ -2705,12 +2924,18 @@ if (cliArgs.includes('--http')) {
 <div class="field" id="pwField"><label>Password SSH</label><input type="password" name="sshPassword" placeholder="Password SSH..."></div>
 <div class="field" id="keyField" style="display:none"><label>Private Key (isi lengkap)</label><textarea name="sshPrivateKey" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea></div>
 </fieldset>
-<div class="field"><label>🔑 Password Approval</label><input type="password" name="password" placeholder="Masukkan password approval..." required></div>
-<p class="hint">Detail SSH di atas disimpan hanya di memori server selama sesi akses ini aktif, tidak pernah melewati percakapan Claude.</p>
-<button type="submit" name="action" value="allow" class="allow">✅ Izinkan</button>
-<button type="submit" name="action" value="deny" class="deny">❌ Tolak</button>
+<section class="approval-card">
+  <div class="approval-title">🔑 Password Approval</div>
+  <div class="field"><label for="approvalPassword">Password persetujuan</label><input id="approvalPassword" type="password" name="password" placeholder="Masukkan password approval..." required></div>
+  <p class="hint">Detail SSH di atas disimpan hanya di memori server selama sesi akses ini aktif, tidak pernah melewati percakapan Claude.</p>
+</section>
+<div class="actions">
+  <button type="submit" name="action" value="allow" class="allow">✓&nbsp; Izinkan</button>
+  <button type="submit" name="action" value="deny" class="deny">✕&nbsp; Tolak</button>
+</div>
 </form>
 <p class="timer">⏱ Sesi expired dalam <span id="countdown">5:00</span></p>
+</main>
 <script>let s=300;const e=document.getElementById('countdown');const i=setInterval(()=>{s--;if(s<=0){clearInterval(i);e.textContent='EXPIRED';}else{e.textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}},1000);</script>
 </body></html>`);
   });
@@ -2897,7 +3122,7 @@ document.getElementById('upload').onclick=async()=>{
 
   app.get('/health', (req, res) => res.json({
     status: 'ok', version: MCP_VERSION, mode: 'http', auth: 'oauth2-password-protected',
-    tools: ['browser_view','browser_get_view_url','browser_set_mode','browser_open','browser_snapshot','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_project', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
+    tools: ['browser_view','browser_get_view_url','browser_set_mode','browser_open','browser_snapshot','browser_extract_text','browser_extract_transcript','browser_click','browser_type','browser_select','browser_wait','browser_screenshot','browser_execute_js','browser_tabs','browser_back','browser_reload','ssh_connect', 'ssh_exec', 'ssh_exec_persistent', 'ssh_close_shell', 'ssh_edit_file', 'ssh_exec_background', 'ssh_check_background', 'ssh_kill_background', 'ssh_upload', 'ssh_create_upload_slot', 'ssh_write_file', 'ssh_download', 'ssh_read_image', 'adb_screenshot_visual', 'ssh_list_files', 'ssh_repo_snapshot', 'ssh_checkpoint', 'ssh_repo_verify', 'ssh_repo_worktree', 'ssh_repo_review', 'ssh_repo_commit_push', 'ssh_project', 'browser_smoke', 'ssh_workspace', 'ssh_agent_board', 'ssh_disconnect', 'ssh_list_connections'],
     ssh_connections_active: sshConnections.size
   }));
 

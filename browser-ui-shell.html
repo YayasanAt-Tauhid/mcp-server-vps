@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Browser VPS At-Tauhid</title>
 <style>
-html,body{margin:0;height:100%;font:14px system-ui,sans-serif;background:#151a23;color:#fff}
-body{overflow:hidden}
-.top{background:#202938;border-bottom:1px solid #2e394b}
+html,body{margin:0;width:100%;height:100%;min-height:100%;font:14px system-ui,sans-serif;background:#151a23;color:#fff}
+body{position:fixed;inset:0;overflow:hidden;display:flex;flex-direction:column}
+.top{flex:0 0 auto;background:#202938;border-bottom:1px solid #2e394b}
 .bar{min-height:44px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:7px 10px}
 .brand{font-weight:700;white-space:nowrap}
 .status{opacity:.78;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;text-align:center;font-size:12px}
@@ -15,8 +15,9 @@ body{overflow:hidden}
 .controls button,.bar a{border:1px solid #43516a;background:#29364a;color:#eaf1ff;border-radius:8px;padding:6px 9px;font:inherit;text-decoration:none;white-space:nowrap}
 .controls button.active{background:#eaf1ff;color:#182133;border-color:#eaf1ff}
 .controls button:disabled{opacity:.45}
+.controls button[hidden]{display:none}
 .bar a{display:none;color:#b9d4ff}
-.wrap{position:relative;height:calc(100% - 59px);min-height:420px;background:#0e1219;display:flex;justify-content:center}
+.wrap{position:relative;flex:1 1 auto;min-height:0;height:auto;background:#0e1219;display:flex;justify-content:center}
 .viewport{position:relative;width:100%;height:100%;transition:max-width .18s ease}
 .mobile-mode .viewport{max-width:430px;box-shadow:0 0 0 1px #354057}
 iframe{display:none;width:100%;height:100%;border:0;background:#111}
@@ -28,7 +29,7 @@ iframe{display:none;width:100%;height:100%;border:0;background:#111}
   .controls{margin:auto}
   .controls button{padding:6px 8px;font-size:12px}
   .bar a{display:none!important}
-  .wrap{height:calc(100% - 94px)}
+  .wrap{min-height:0}
 }
 </style>
 </head>
@@ -39,9 +40,10 @@ iframe{display:none;width:100%;height:100%;border:0;background:#111}
     <div class="controls">
       <button id="mode-desktop" type="button" disabled>🖥 Desktop</button>
       <button id="mode-mobile" type="button" disabled>📱 Mobile</button>
+      <button id="mode-retry" type="button" hidden>Sambung ulang</button>
       <button id="mode-fullscreen" type="button" disabled title="Fullscreen">⛶</button>
     </div>
-    <span id="status" class="status">Menyiapkan MCP App…</span>
+    <span id="status" class="status" role="status">Menyiapkan MCP App…</span>
     <a id="external" target="_blank" rel="noopener noreferrer">Buka layar terpisah</a>
   </div>
 </div>

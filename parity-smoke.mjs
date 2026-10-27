@@ -29,9 +29,9 @@ try {
   assert(ready,'sidecar failed to start');
   await client.connect(new StreamableHTTPClientTransport(new URL(base),{requestInit:{headers:{Authorization:'Bearer '+bearer}}}));
   const tools=(await client.listTools()).tools;
-  assert.equal(tools.length,40);assert.equal(new Set(tools.map(t=>t.name)).size,40);
-  for(const n of ['ssh_checkpoint','ssh_repo_snapshot','ssh_repo_verify','ssh_repo_worktree','ssh_repo_review','ssh_repo_commit_push','ssh_project','ssh_workspace','ssh_agent_board','ssh_create_upload_slot','ssh_read_image','browser_smoke','adb_screenshot_visual','browser_view'])assert(tools.some(t=>t.name===n),n);
-  pass('40 tools and preserved browser schemas');
+  assert.equal(tools.length,43);assert.equal(new Set(tools.map(t=>t.name)).size,43);
+  for(const n of ['ssh_checkpoint','ssh_repo_snapshot','ssh_repo_verify','ssh_repo_worktree','ssh_repo_review','ssh_repo_commit_push','ssh_project','ssh_workspace','ssh_agent_board','ssh_create_upload_slot','ssh_read_image','browser_smoke','adb_screenshot_visual','browser_view','browser_screenshot_view','browser_extract_text','browser_extract_transcript'])assert(tools.some(t=>t.name===n),n);
+  pass('43 tools and preserved browser schemas');
   const resources=await client.listResources();assert(resources.resources.some(r=>r.uri.includes('browser-card')));
   const resource=await client.readResource({uri:resources.resources[0].uri});assert(resource.contents[0].text.includes('<'));
   await call('browser_tabs',{action:'list'});pass('browser connection and MCP App resource');
