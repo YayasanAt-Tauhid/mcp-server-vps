@@ -1,9 +1,22 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import {ListResourcesRequestSchema,ReadResourceRequestSchema} from '@modelcontextprotocol/sdk/types.js';
 import {
   browserOpen, browserSnapshot, browserClick, browserType, browserSelect,
-  browserWait, browserScreenshot, browserTabs, browserBack, browserReload, browserSetMode
+  browserWait, browserScreenshot, browserTabs, browserBack, browserReload, browserSetMode,
+  browserExtractText, browserExtractTranscript, browserExecuteJs, browserExportPdf
 } from './browser-tools.js';
+
+const BROWSER_SCREENSHOT_UI_URI = 'ui://attauhid/browser-screenshot-v1.html';
+// Domain sandbox MCP Apps di Claude.ai diturunkan dari URL server.
+const claudeAppDomain = (url) => createHash('sha256').update(url).digest('hex').slice(0, 32) + '.claudemcpcontent.com';
+const isClaudeClient = (server) => /claude/i.test(server.getClientVersion?.()?.name || '');
+function screenshotUiMeta(server, baseUrl) {
+  return {
+    ...(isClaudeClient(server) ? { domain: claudeAppDomain(baseUrl) } : {}),
+    prefersBorder: false
+  };
+}
 
 
 const BROWSER_UI_URI='ui://safara/browser-v5.html';
@@ -186,6 +199,78 @@ export const sharedBrowserTools=[{
         name: 'browser_reload',
         description: 'Reload tab browser aktif.',
         inputSchema: { type: 'object', properties: { tabIndex: { type: 'number' }, timeoutMs: { type: 'number' } } }
+      },
+      {
+        name: 'browser_extract_text',
+        description: 'Ambil teks halaman secara read-only dari DOM Chromium. Mendukung iframe, open Shadow DOM, auto-scroll opsional, dan pagination untuk halaman sangat panjang.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: { type: 'string', description: 'CSS selector target; default body' },
+            tabIndex: { type: 'number' },
+            includeFrames: { type: 'boolean', description: 'Sertakan iframe; default true' },
+            includeShadowDom: { type: 'boolean', description: 'Sertakan open Shadow DOM; default true' },
+            autoScroll: { type: 'boolean', description: 'Scroll halaman utama untuk memuat lazy content; default false' },
+            maxScrollSteps: { type: 'number', minimum: 1, maximum: 60, description: 'Batas langkah auto-scroll; default 12' },
+            offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default/maksimum 200000 karakter' }
+          }
+        }
+      },
+      {
+        name: 'browser_extract_transcript',
+        description: 'Ambil caption/transkrip yang sudah tampil di DOM browser secara read-only. Tidak merekam audio. Mendukung iframe dan pagination.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: { type: 'string', description: 'Selector khusus transcript/caption; opsional. Jika kosong memakai selector caption/transcript umum.' },
+            tabIndex: { type: 'number' },
+            includeFrames: { type: 'boolean', description: 'Sertakan iframe; default true' },
+            dedupe: { type: 'boolean', description: 'Hapus baris duplikat; default true' },
+            offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default/maksimum 200000 karakter' }
+          }
+        }
+      },
+      {
+        name: 'browser_screenshot_view',
+        description: 'Ambil screenshot PNG (atau PDF) dari browser bersama VPS dan tampilkan sebagai panel gambar MCP App. Gunakan saat client tidak menampilkan MCP image content secara langsung.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            fullPage: { type: 'boolean', description: 'Screenshot seluruh halaman; default false' },
+            format: { type: 'string', enum: ['image', 'pdf'], description: 'Output panel: image PNG atau pdf; default image' },
+            tabIndex: { type: 'number', description: 'Tab yang diambil; default tab aktif' }
+          }
+        },
+        outputSchema: {
+          type: 'object',
+          properties: { ready: { type: 'boolean' }, format: { type: 'string', enum: ['image', 'pdf'] } },
+          required: ['ready'],
+          additionalProperties: false
+        },
+        _meta: {
+          ui: { resourceUri: BROWSER_SCREENSHOT_UI_URI, visibility: ['model', 'app'] },
+          'ui/resourceUri': BROWSER_SCREENSHOT_UI_URI,
+          'openai/outputTemplate': BROWSER_SCREENSHOT_UI_URI,
+          'openai/toolInvocation/invoking': 'Mengambil screenshot browser…',
+          'openai/toolInvocation/invoked': 'Screenshot browser siap'
+        }
+      },
+      {
+        name: 'browser_execute_js',
+        description: 'Jalankan JavaScript pada halaman Chromium aktif dan kembalikan hasilnya.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            script: { type: 'string' },
+            tabIndex: { type: 'number' },
+            timeoutMs: { type: 'number', description: 'Batas waktu eksekusi; default 10000 ms, maksimum 30000 ms' },
+            offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk per panggilan; default/maksimum 200000 karakter' }
+          },
+          required: ['script']
+        }
       }];
 export function registerBrowserResources(server, browserViewLink, baseUrl) {
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
@@ -204,11 +289,33 @@ export function registerBrowserResources(server, browserViewLink, baseUrl) {
           }
         }
       }
+    }, {
+      uri: BROWSER_SCREENSHOT_UI_URI,
+      name: 'Screenshot Browser VPS',
+      mimeType: 'text/html;profile=mcp-app',
+      _meta: {
+        'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
+        ui: screenshotUiMeta(server, baseUrl)
+      }
     }]
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const requestedUri = request.params.uri;
+    if (requestedUri === BROWSER_SCREENSHOT_UI_URI) {
+      console.error('[UI] resources/read', requestedUri);
+      return { contents: [{
+        uri: requestedUri,
+        mimeType: 'text/html;profile=mcp-app',
+        text: readFileSync(new URL('./browser-screenshot-ui.html', import.meta.url), 'utf8'),
+        _meta: {
+          ui: screenshotUiMeta(server, baseUrl),
+          'openai/ui': { availableDisplayModes: ['inline', 'fullscreen'] },
+          'openai/widgetDescription': 'Screenshot statis dari browser bersama VPS.',
+          'openai/widgetPrefersBorder': false
+        }
+      }] };
+    }
     if (!BROWSER_UI_URI_RE.test(requestedUri)) throw new Error('Resource tidak ditemukan');
     console.error('[UI] resources/read', requestedUri);
     return { contents: [{
@@ -372,6 +479,53 @@ export async function handleBrowserTool(name,args,browserViewLink) {
       }
     }
 
+    if (name === 'browser_extract_text') {
+      try {
+        const result = await browserExtractText(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Extract Text Error: ' + err.message }], isError: true };
+      }
+    }
+
+    if (name === 'browser_extract_transcript') {
+      try {
+        const result = await browserExtractTranscript(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Extract Transcript Error: ' + err.message }], isError: true };
+      }
+    }
+
+    if (name === 'browser_execute_js') {
+      try {
+        const result = await browserExecuteJs(args || {});
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Browser Execute JS Error: ' + err.message }], isError: true };
+      }
+    }
+
+    if (name === 'browser_screenshot_view') {
+      try {
+        if ((args || {}).format === 'pdf') {
+          const result = await browserExportPdf(args || {});
+          return {
+            structuredContent: { ready: true, format: 'pdf' },
+            content: [{ type: 'text', text: 'PDF browser siap ditampilkan pada panel.' }],
+            _meta: { pdfData: result.pdf, pdfInfo: result.info, ui: { resourceUri: BROWSER_SCREENSHOT_UI_URI }, 'openai/outputTemplate': BROWSER_SCREENSHOT_UI_URI }
+          };
+        }
+        const result = await browserScreenshot(args || {});
+        return {
+          structuredContent: { ready: true, format: 'image' },
+          content: [{ type: 'text', text: 'Screenshot browser siap ditampilkan pada panel gambar.' }],
+          _meta: { screenshotDataUrl: 'data:image/png;base64,' + result.image, screenshotInfo: result.info, ui: { resourceUri: BROWSER_SCREENSHOT_UI_URI }, 'openai/outputTemplate': BROWSER_SCREENSHOT_UI_URI }
+        };
+      } catch (err) {
+        return { structuredContent: { ready: false }, content: [{ type: 'text', text: 'Browser Screenshot View Error: ' + err.message }], isError: true };
+      }
+    }
 
 return null;
 }

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Screenshot Browser VPS At-Tauhid</title>
+<style>
+html,body{margin:0;width:100%;min-height:100%;font:14px system-ui,sans-serif;background:#0f172a;color:#e5eefc}
+body{display:flex;justify-content:center}
+main{width:100%;box-sizing:border-box;padding:12px}
+.card{width:100%;max-width:1280px;margin:0 auto;background:#111827;border:1px solid #273449;border-radius:14px;overflow:hidden}
+.bar{display:flex;align-items:center;gap:12px;min-height:42px;padding:8px 12px;box-sizing:border-box;background:#172033;border-bottom:1px solid #273449}
+.title{font-weight:700}
+.status{margin-left:auto;font-size:12px;opacity:.78}
+.stage{display:flex;justify-content:center;align-items:flex-start;min-height:120px;background:#0b1220}
+#loading{padding:28px 18px;text-align:center;color:#cbd5e1}
+img#screenshot{display:block;width:100%;max-width:1280px;height:auto;object-fit:contain;margin:0 auto}
+img#screenshot[hidden]{display:none}
+iframe#pdf{display:block;width:100%;height:80vh;border:0}
+iframe#pdf[hidden]{display:none}
+.stage{max-height:80vh;overflow:auto}
+</style>
+</head>
+<body>
+<main>
+  <section class="card">
+    <div class="bar">
+      <span class="title">Screenshot Browser VPS At-Tauhid</span>
+      <span id="status" class="status">Menyiapkan tampilan…</span>
+    </div>
+    <div class="stage">
+      <div id="loading">Menunggu screenshot dari MCP…</div>
+      <img id="screenshot" alt="Screenshot browser VPS At-Tauhid" hidden>
+      <iframe id="pdf" title="PDF browser VPS At-Tauhid" hidden></iframe>
+    </div>
+  </section>
+</main>
+<script>/*__BROWSER_SCREENSHOT_UI_BUNDLE__*/</script>
+</body>
+</html>
