@@ -41,6 +41,7 @@ import { normalizeAllowedBrowserHosts, runBrowserSmoke } from './browser-smoke.j
 import { assertWorkspaceId, normalizeWorkspaceTasks, normalizeWorkspaceManifest } from './workspace-tools.js';
 import { assertProjectId, normalizeProjectProfile, updateProjectProfile } from './project-profile.js';
 import { assistantTools, createAssistantHandler } from './assistant-tools.js';
+import { loadTargets, buildConnectConfig, stripAclArgs, stripAclFromSchemas, describeTargets } from './ssh-targets.js';
 import {
   assertAgentBoardId,
   createAgentBoardState,
@@ -1415,7 +1416,7 @@ const handleAssistant = createAssistantHandler({
   }
 });
 
-function createServer(sshDefaultConfig) {
+function createServer() {
   const server = new Server(
     { name: 'vps2-mcp', version: MCP_VERSION },
     { capabilities: { tools: {}, ...(sharedBrowser ? {resources:{}} : {}) }, instructions: CHAT_WORKFLOW_INSTRUCTIONS + ' ' + PROJECT_ASSISTANT_INSTRUCTIONS }
@@ -1423,27 +1424,19 @@ function createServer(sshDefaultConfig) {
 
   if (sharedBrowser) registerBrowserResources(server, sharedBrowser.issueLink, BASE_URL);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
+    tools: stripAclFromSchemas([
       ...(sharedBrowser ? sharedBrowserTools : []),
       ...assistantTools,
       {
         name: 'ssh_connect',
-        description: sshDefaultConfig
-          ? `Buat koneksi SSH ke server remote. Target default (${sshDefaultConfig.username}@${sshDefaultConfig.host}:${sshDefaultConfig.port}) sudah dikonfigurasi saat otorisasi OAuth — cukup panggil dengan connectionId saja, tanpa perlu host/username/password/privateKey.`
-          : 'Buat koneksi SSH ke server remote',
+        description: `Hubungkan ke VPS yang terdaftar. Target tersedia:\n${describeTargets(loadTargets().targets)}`,
         inputSchema: {
           type: 'object',
           properties: {
-            connectionId: { type: 'string', description: 'ID unik untuk koneksi ini' },
-            host: { type: 'string', description: 'Hostname atau IP server (opsional jika sudah diset saat otorisasi OAuth)' },
-            port: { type: 'number', description: 'Port SSH (default: 22, atau yang diset saat otorisasi)' },
-            username: { type: 'string', description: 'Username SSH (opsional jika sudah diset saat otorisasi OAuth)' },
-            password: { type: 'string', description: 'Password SSH (opsional)' },
-            privateKey: { type: 'string', description: 'Isi private key SSH (opsional)' },
-            whitelist: { type: 'array', items: { type: 'string' }, description: 'Whitelist perintah (regex), opsional' },
-            blacklist: { type: 'array', items: { type: 'string' }, description: 'Blacklist perintah (regex), opsional' }
+            target: { type: 'string', description: 'Nama target VPS terdaftar' },
+            connectionId: { type: 'string', description: 'ID koneksi; default sama dengan nama target' }
           },
-          required: ['connectionId']
+          required: ['target']
         }
       },
       {
@@ -1911,14 +1904,16 @@ function createServer(sshDefaultConfig) {
       },
       {
         name: 'ssh_list_connections',
-        description: 'Tampilkan daftar koneksi SSH yang aktif',
+        description: 'Tampilkan koneksi SSH aktif dan target VPS yang terdaftar',
         inputSchema: { type: 'object', properties: {} }
       }
-    ]
+    ])
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
+    const { name } = request.params;
+    // Aturan perintah (whitelist/blacklist) hanya berasal dari registry target, tidak pernah dari model.
+    const args = stripAclArgs(request.params.arguments);
     if (sharedBrowser && sharedBrowserTools.some(tool => tool.name === name)) return handleBrowserTool(name, args || {}, sharedBrowser.issueLink);
 
     if (assistantTools.some(tool => tool.name === name)) {
@@ -1932,24 +1927,18 @@ function createServer(sshDefaultConfig) {
 
     if (name === 'ssh_connect') {
       try {
-        const base = sshDefaultConfig || {};
-        const host = args.host || base.host;
-        const username = args.username || base.username;
-        const port = args.port || base.port || 22;
-        if (!host || !username) {
-          return { content: [{ type: 'text', text: 'SSH Error: host/username tidak diset. Isi lewat argumen tool, atau lakukan otorisasi OAuth ulang dan isi Host/Username di halaman auth.' }] };
+        const { targets, errors } = loadTargets();
+        for (const e of errors) console.error(`[TARGETS] ${e.file} diabaikan: ${e.error}`);
+        const target = targets.get(String(args.target || ''));
+        if (!target) {
+          return { isError: true, content: [{ type: 'text', text: `SSH Error: target "${args.target ?? ''}" tidak terdaftar. Target tersedia:\n${describeTargets(targets)}\nTarget baru hanya bisa ditambahkan admin dengan "mcp-target add" di server MCP.` }] };
         }
-        const config = { host, port, username };
-        if (args.password) config.password = args.password;
-        else if (args.privateKey) config.privateKey = args.privateKey;
-        else if (base.privateKey) config.privateKey = base.privateKey;
-        else if (base.password) config.password = base.password;
-        if (args.whitelist) config.whitelist = args.whitelist;
-        if (args.blacklist) config.blacklist = args.blacklist;
-        await sshConnect(args.connectionId, config);
-        return { content: [{ type: 'text', text: `Berhasil terhubung ke ${username}@${host}:${port} (ID: ${args.connectionId})` }] };
+        const connectionId = String(args.connectionId || target.name);
+        await sshConnect(connectionId, buildConnectConfig(target));
+        return { content: [{ type: 'text', text: `Berhasil terhubung ke ${target.username}@${target.host}:${target.port} (ID: ${connectionId})` }] };
       } catch (err) {
-        return { content: [{ type: 'text', text: 'SSH Error: ' + err.message }] };
+        const hint = /host key|verif/i.test(err.message) ? ' (host key tidak cocok dengan yang dipin; jalankan "mcp-target test" di server MCP)' : '';
+        return { isError: true, content: [{ type: 'text', text: 'SSH Error: ' + err.message + hint }] };
       }
     }
 
@@ -2278,7 +2267,8 @@ function createServer(sshDefaultConfig) {
 
     if (name === 'ssh_list_connections') {
       const list = [...sshConnections.keys()];
-      return { content: [{ type: 'text', text: list.length ? 'Koneksi aktif: ' + list.join(', ') : 'Tidak ada koneksi aktif' }] };
+      const active = list.length ? 'Koneksi aktif: ' + list.join(', ') : 'Tidak ada koneksi aktif';
+      return { content: [{ type: 'text', text: `${active}\n\nTarget terdaftar:\n${describeTargets(loadTargets().targets)}` }] };
     }
 
     return { content: [{ type: 'text', text: 'Tool tidak ditemukan' }] };
@@ -2347,20 +2337,7 @@ if (cliArgs.includes('--http')) {
 <div class="info"><b>Akses yang diberikan:</b><br>• Koneksi SSH ke server remote<br>• Eksekusi perintah via SSH<br>• Upload & Download file via SSH<br>• Browse file via SSH</div>
 <form method="POST" action="/oauth/approve">
 <input type="hidden" name="tempId" value="${tempId}">
-<fieldset>
-<legend>Target VPS (SSH)</legend>
-<div class="field"><label>Host / IP</label><input type="text" name="sshHost" placeholder="mis. 103.xxx.xxx.xxx" required></div>
-<div class="row">
-<div class="field"><label>Username SSH</label><input type="text" name="sshUsername" placeholder="root" required></div>
-<div class="field"><label>Port</label><input type="number" name="sshPort" placeholder="22" value="22"></div>
-</div>
-<div class="authmethod">
-<label><input type="radio" name="sshAuthMethod" value="password" checked onchange="document.getElementById('pwField').style.display='block';document.getElementById('keyField').style.display='none'"> Password</label>
-<label><input type="radio" name="sshAuthMethod" value="privateKey" onchange="document.getElementById('pwField').style.display='none';document.getElementById('keyField').style.display='block'"> Private Key</label>
-</div>
-<div class="field" id="pwField"><label>Password SSH</label><input type="password" name="sshPassword" placeholder="Password SSH..."></div>
-<div class="field" id="keyField" style="display:none"><label>Private Key (isi lengkap)</label><textarea name="sshPrivateKey" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea></div>
-</fieldset>
+
 <div class="field"><label>🔑 Password Approval</label><input type="password" name="password" placeholder="Masukkan password approval..." required></div>
 <p class="hint">Detail SSH di atas disimpan hanya di memori server selama sesi akses ini aktif, tidak pernah melewati percakapan Claude.</p>
 <button type="submit" name="action" value="allow" class="allow">✅ Izinkan</button>
@@ -2372,7 +2349,7 @@ if (cliArgs.includes('--http')) {
   });
 
   app.post('/oauth/approve', async (req, res) => {
-    const { tempId, action, password, sshHost, sshUsername, sshPort, sshAuthMethod, sshPassword, sshPrivateKey } = req.body;
+    const { tempId, action, password } = req.body;
     const ip = getClientIP(req);
     if (isRateLimited(ip)) return res.status(429).send('<html><body style="font-family:sans-serif;max-width:400px;margin:80px auto;padding:20px"><h2>🚫 IP Diblokir</h2><p>Coba lagi setelah 15 menit.</p></body></html>');
     const pending = authCodes.get('pending_' + tempId);
@@ -2388,25 +2365,15 @@ if (cliArgs.includes('--http')) {
       const remaining = MAX_ATTEMPTS - attempts;
       return res.status(401).send(`<html><body style="font-family:sans-serif;max-width:400px;margin:80px auto;padding:20px"><h2>❌ ${remaining > 0 ? `Password salah. Sisa: ${remaining}` : 'IP diblokir 15 menit.'}</h2><a href="javascript:history.back()" style="color:#2563eb">← Coba lagi</a></body></html>`);
     }
-    if (!sshHost || !sshUsername) {
-      return res.status(400).send('<html><body style="font-family:sans-serif;max-width:400px;margin:80px auto;padding:20px"><h2>❌ Data SSH tidak lengkap</h2><p>Host dan Username SSH wajib diisi.</p><a href="javascript:history.back()" style="color:#2563eb">← Coba lagi</a></body></html>');
-    }
     resetAttempts(ip);
     authCodes.delete('pending_' + tempId);
     const { redirect_uri, state, code_challenge, code_challenge_method, client_id } = pending;
-    const sshDefaultConfig = {
-      host: sshHost,
-      port: sshPort ? parseInt(sshPort, 10) : 22,
-      username: sshUsername,
-    };
-    if (sshAuthMethod === 'privateKey' && sshPrivateKey) sshDefaultConfig.privateKey = sshPrivateKey;
-    else if (sshPassword) sshDefaultConfig.password = sshPassword;
     const code = crypto.randomBytes(16).toString('hex');
-    authCodes.set(code, { client_id, redirect_uri, code_challenge, code_challenge_method, used: false, sshDefaultConfig });
+    authCodes.set(code, { client_id, redirect_uri, code_challenge, code_challenge_method, used: false });
     const url = new URL(redirect_uri);
     url.searchParams.set('code', code);
     if (state) url.searchParams.set('state', state);
-    console.error(`[AUTH] Akses diizinkan untuk IP ${ip} (target SSH: ${sshUsername}@${sshHost}:${sshDefaultConfig.port})`);
+    console.error(`[AUTH] Akses diizinkan untuk IP ${ip}`);
     res.redirect(url.toString());
   });
 
@@ -2421,7 +2388,7 @@ if (cliArgs.includes('--http')) {
     }
     stored.used = true;
     const access_token = crypto.randomBytes(32).toString('hex');
-    accessTokens.set(access_token, { created: Date.now(), sshDefaultConfig: stored.sshDefaultConfig || null });
+    accessTokens.set(access_token, { created: Date.now() });
     res.json({ access_token, token_type: 'Bearer', expires_in: 86400 });
   });
 
@@ -2430,8 +2397,8 @@ if (cliArgs.includes('--http')) {
     const authHeader = req.headers['authorization'] || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : (req.query.token || '');
     const tokenData = accessTokens.get(token);
-    if (tokenData) { req.sshDefaultConfig = tokenData.sshDefaultConfig || null; return next(); }
-    if (token === MCP_TOKEN) { req.sshDefaultConfig = null; return next(); }
+    if (tokenData) return next();
+    if (token === MCP_TOKEN) return next();
     return res.status(401)
       .set('WWW-Authenticate', `Bearer realm="${BASE_URL}", authorization_uri="${BASE_URL}/oauth/authorize", resource_metadata="${BASE_URL}/.well-known/oauth-protected-resource"`)
       .json({ error: 'unauthorized', resource_metadata: `${BASE_URL}/.well-known/oauth-protected-resource` });
@@ -2515,7 +2482,7 @@ document.getElementById('upload').onclick=async()=>{
     let t;
     if (sid && transports[sid]) { t = transports[sid]; } else {
       t = new StreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomBytes(16).toString('hex') });
-      const srv = createServer(req.sshDefaultConfig);
+      const srv = createServer();
       t.onclose = () => { if (t.sessionId) delete transports[t.sessionId]; };
       await srv.connect(t);
       await t.handleRequest(req, res, req.body);
@@ -2538,7 +2505,7 @@ document.getElementById('upload').onclick=async()=>{
   });
 
   app.get('/sse', async (req, res) => {
-    const server = createServer(req.sshDefaultConfig);
+    const server = createServer();
     const transport = new SSEServerTransport('/message', res);
     transports[transport.sessionId] = transport;
     res.on('close', () => delete transports[transport.sessionId]);

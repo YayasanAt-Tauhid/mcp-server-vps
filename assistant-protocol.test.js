@@ -11,8 +11,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { normalizeProjectProfile } from './project-profile.js';
+import { startKeySshServer, writeRegistry } from './ssh-test-server.js';
 
-const { Server: SSHServer } = ssh2;
 const smokeUrl = process.env.MCP_ASSISTANT_SMOKE_URL;
 
 test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'client reconnection' : 'a complete MCP process restart'), { timeout: 25000 }, async t => {
@@ -22,31 +22,11 @@ test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'clien
   mkdirSync(repo);
   mkdirSync(profiles, { recursive: true });
   writeFileSync(join(profiles, 'smoke.json'), JSON.stringify(normalizeProjectProfile({ projectId: 'smoke', repoPath: repo })), { mode: 0o600 });
-  const hostKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' });
-  const pass = randomBytes(24).toString('hex');
-  const peers = new Set();
-  const ssh = new SSHServer({ hostKeys: [hostKey] }, peer => {
-    peers.add(peer);
-    peer.on('close', () => peers.delete(peer));
-    peer.on('error', () => {});
-    peer.on('authentication', context => {
-      if (context.method === 'password' && context.username === 'smoke' && context.password === pass) context.accept();
-      else context.reject();
-    });
-    peer.on('ready', () => peer.on('session', accept => {
-      accept().on('exec', (acceptExec, _reject, info) => {
-        const channel = acceptExec();
-        const child = spawn('/bin/sh', ['-c', info.command], { cwd: repo, env: { ...process.env, HOME: home } });
-        child.stdout.on('data', chunk => { if (!channel.destroyed) channel.write(chunk); });
-        child.stderr.on('data', chunk => { if (!channel.destroyed) channel.stderr.write(chunk); });
-        channel.on('error', () => {});
-        channel.pipe(child.stdin);
-        child.on('close', code => { if (!channel.destroyed) { channel.exit(code ?? 1); channel.end(); } });
-      });
-    }));
-  });
-  await new Promise((resolve, reject) => { ssh.once('error', reject); ssh.listen(0, '127.0.0.1', resolve); });
-  const port = ssh.address().port;
+  const clientKeys = ssh2.utils.generateKeyPairSync('ed25519');
+  const keyFile = join(home, 'id_ed25519');
+  writeFileSync(keyFile, clientKeys.private, { mode: 0o600 });
+  const ssh = await startKeySshServer({ cwd: repo, home, allowedPub: clientKeys.public });
+  const targetsDir = writeRegistry(home, { smoke: { host: '127.0.0.1', port: ssh.port, username: 'smoke', hostKeys: [ssh.hostFp] } });
   const connectionId = 'assistant-smoke-' + randomBytes(6).toString('hex');
   let client;
   async function connect() {
@@ -59,13 +39,13 @@ test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'clien
       assert.ok(bearer, 'Static authentication must be configured for HTTP smoke');
       transport = new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: 'Bearer ' + bearer } } });
     } else {
-      transport = new StdioClientTransport({ command: process.execPath, args: ['index.js'], cwd: new URL('.', import.meta.url).pathname, stderr: 'pipe', env: { ...process.env, SHARED_BROWSER_ENABLED: 'false' } });
+      transport = new StdioClientTransport({ command: process.execPath, args: ['index.js'], cwd: new URL('.', import.meta.url).pathname, stderr: 'pipe', env: { ...process.env, SHARED_BROWSER_ENABLED: 'false', MCP_TARGETS_DIR: targetsDir, MCP_SSH_KEY_FILE: keyFile } });
     }
     transport.stderr?.on('data', () => {});
     client = new Client({ name: 'assistant-protocol-test', version: '1.0.0' });
     await client.connect(transport);
     assert.equal(client.getServerVersion().version, '3.12.0');
-    const response = await client.callTool({ name: 'ssh_connect', arguments: { connectionId, host: '127.0.0.1', port, username: 'smoke', password: pass } });
+    const response = await client.callTool({ name: 'ssh_connect', arguments: { target: 'smoke', connectionId } });
     assert.match(response.content[0].text, /Berhasil terhubung/);
   }
   async function call(name, args) {
@@ -76,8 +56,7 @@ test('MCP protocol exposes project tools and jobs survive ' + (smokeUrl ? 'clien
   t.after(async () => {
     try { await client?.callTool({ name: 'ssh_disconnect', arguments: { connectionId } }); } catch {}
     await client?.close();
-    for (const peer of peers) peer.end();
-    await new Promise(resolve => ssh.close(resolve));
+    await ssh.close();
     rmSync(home, { recursive: true, force: true });
   });
   await connect();
