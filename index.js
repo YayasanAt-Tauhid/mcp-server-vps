@@ -55,6 +55,7 @@ import {
   canRemoveAgentBoard,
   assertAgentBoardWorkspaceMapping
 } from './agent-board.js';
+import { toolJson } from './tool-json.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1927,7 +1928,7 @@ function createServer() {
     if (assistantTools.some(tool => tool.name === name)) {
       try {
         const result = await handleAssistant(name, args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Project Assistant Error: ' + err.message }] };
       }
@@ -2047,7 +2048,7 @@ function createServer() {
           args.allowOverwrite || false,
           allowedRoots
         );
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Create Upload Slot Error: ' + err.message }] };
       }
@@ -2108,7 +2109,7 @@ function createServer() {
     if (name === 'ssh_list_files') {
       try {
         const files = await sshListFiles(args.connectionId, args.remotePath);
-        return { content: [{ type: 'text', text: JSON.stringify(files, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(files) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'SSH List Error: ' + err.message }] };
       }
@@ -2117,7 +2118,7 @@ function createServer() {
     if (name === 'ssh_repo_snapshot') {
       try {
         const result = await sshRepoSnapshotWorkflow(args.connectionId, args.repoPath, args.fetch, args.whitelist, args.blacklist);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Repo Snapshot Error: ' + err.message }] };
       }
@@ -2129,7 +2130,7 @@ function createServer() {
           throw new Error('checkpointId wajib untuk action=' + args.action);
         }
         const result = await sshCheckpointWorkflow(args.connectionId, args.action, args.checkpointId, args.data, args.whitelist, args.blacklist);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Checkpoint Error: ' + err.message }] };
       }
@@ -2138,7 +2139,7 @@ function createServer() {
     if (name === 'ssh_repo_verify') {
       try {
         const result = await sshRepoVerifyWorkflow(args.connectionId, args.repoPath, args.runScripts, args.whitelist, args.blacklist);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Repo Verify Error: ' + err.message }] };
       }
@@ -2151,7 +2152,7 @@ function createServer() {
         }
         if (args.action === 'create' && !args.branch) throw new Error('branch wajib untuk action=create');
         const result = await sshRepoWorktreeWorkflow(args.connectionId, args.repoPath, args.action, args, args.whitelist, args.blacklist);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Repo Worktree Error: ' + err.message }] };
       }
@@ -2160,7 +2161,7 @@ function createServer() {
     if (name === 'ssh_repo_review') {
       try {
         const result = await sshRepoReviewWorkflow(args.connectionId, args.repoPath, args.baseRef, args.whitelist, args.blacklist);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Repo Review Error: ' + err.message }] };
       }
@@ -2171,7 +2172,7 @@ function createServer() {
         const result = await sshRepoCommitPushWorkflow(args.connectionId, args);
         return {
           ...(result.ok ? {} : { isError: true }),
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          content: [{ type: 'text', text: toolJson(result) }]
         };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Repo Commit/Push Error: ' + err.message }] };
@@ -2189,7 +2190,7 @@ function createServer() {
           const result = await sshProjectWorkflow(args.connectionId, args.action, args);
           const screenshot = result.screenshot;
           const safeResult = { ...result, screenshot: screenshot ? { bytes: screenshot.length, mimeType: 'image/png' } : null };
-          const content = [{ type: 'text', text: JSON.stringify(safeResult, null, 2) }];
+          const content = [{ type: 'text', text: toolJson(safeResult) }];
           if (screenshot) {
             assertImageBuffer(screenshot, args.maxScreenshotBytes);
             content.push(toImageContent(screenshot, 'image/png'));
@@ -2206,7 +2207,7 @@ function createServer() {
         const result = await sshProjectWorkflow(args.connectionId, args.action, args);
         return {
           ...(result.ok === false ? { isError: true } : {}),
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          content: [{ type: 'text', text: toolJson(result) }]
         };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Project Error: ' + err.message }] };
@@ -2222,7 +2223,7 @@ function createServer() {
         const result = await runBrowserSmoke(args, BROWSER_SMOKE_ALLOWED_HOSTS, BROWSER_SMOKE_LOCAL_PORTS);
         const screenshot = result.screenshot;
         const safeResult = { ...result, screenshot: screenshot ? { bytes: screenshot.length, mimeType: 'image/png' } : null };
-        const content = [{ type: 'text', text: JSON.stringify(safeResult, null, 2) }];
+        const content = [{ type: 'text', text: toolJson(safeResult) }];
         if (screenshot) {
           assertImageBuffer(screenshot, args.maxScreenshotBytes);
           content.push(toImageContent(screenshot, 'image/png'));
@@ -2242,7 +2243,7 @@ function createServer() {
         const result = await sshWorkspaceWorkflow(args.connectionId, args.action, args);
         return {
           ...(result.ok === false ? { isError: true } : {}),
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          content: [{ type: 'text', text: toolJson(result) }]
         };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Workspace Error: ' + err.message }] };
@@ -2255,7 +2256,7 @@ function createServer() {
         const result = await sshAgentBoardWorkflow(args.connectionId, args.action, args);
         return {
           ...(result.ok === false ? { isError: true } : {}),
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          content: [{ type: 'text', text: toolJson(result) }]
         };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: 'Agent Board Error: ' + err.message }] };

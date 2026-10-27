@@ -6,6 +6,7 @@ import {
   browserWait, browserScreenshot, browserTabs, browserBack, browserReload, browserSetMode,
   browserExtractText, browserExtractTranscript, browserExecuteJs, browserExportPdf
 } from './browser-tools.js';
+import { toolJson } from './tool-json.js';
 
 const BROWSER_SCREENSHOT_UI_URI = 'ui://attauhid/browser-screenshot-v1.html';
 // Domain sandbox MCP Apps di Claude.ai diturunkan dari URL server.
@@ -213,7 +214,7 @@ export const sharedBrowserTools=[{
             autoScroll: { type: 'boolean', description: 'Scroll halaman utama untuk memuat lazy content; default false' },
             maxScrollSteps: { type: 'number', minimum: 1, maximum: 60, description: 'Batas langkah auto-scroll; default 12' },
             offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
-            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default/maksimum 200000 karakter' }
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default 30000, maksimum 200000 karakter' }
           }
         }
       },
@@ -228,7 +229,7 @@ export const sharedBrowserTools=[{
             includeFrames: { type: 'boolean', description: 'Sertakan iframe; default true' },
             dedupe: { type: 'boolean', description: 'Hapus baris duplikat; default true' },
             offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
-            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default/maksimum 200000 karakter' }
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk; default 30000, maksimum 200000 karakter' }
           }
         }
       },
@@ -267,7 +268,7 @@ export const sharedBrowserTools=[{
             tabIndex: { type: 'number' },
             timeoutMs: { type: 'number', description: 'Batas waktu eksekusi; default 10000 ms, maksimum 30000 ms' },
             offset: { type: 'number', minimum: 0, description: 'Posisi karakter awal untuk pagination; default 0' },
-            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk per panggilan; default/maksimum 200000 karakter' }
+            maxChars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Ukuran chunk per panggilan; default 30000, maksimum 200000 karakter' }
           },
           required: ['script']
         }
@@ -379,7 +380,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
         const result = await browserSetMode(args || {});
         return {
           structuredContent: { mode: result.mode, viewport: result.viewport },
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+          content: [{ type: 'text', text: toolJson(result) }]
         };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Set Mode Error: ' + err.message }], isError: true };
@@ -389,7 +390,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_open') {
       try {
         const result = await browserOpen(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Open Error: ' + err.message }] , isError: true };
       }
@@ -398,7 +399,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_snapshot') {
       try {
         const result = await browserSnapshot(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Snapshot Error: ' + err.message }] , isError: true };
       }
@@ -407,7 +408,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_click') {
       try {
         const result = await browserClick(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Click Error: ' + err.message }] , isError: true };
       }
@@ -416,7 +417,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_type') {
       try {
         const result = await browserType(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Type Error: ' + err.message }] , isError: true };
       }
@@ -425,7 +426,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_select') {
       try {
         const result = await browserSelect(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Select Error: ' + err.message }] , isError: true };
       }
@@ -434,7 +435,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_wait') {
       try {
         const result = await browserWait(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Wait Error: ' + err.message }] , isError: true };
       }
@@ -444,7 +445,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
       try {
         const result = await browserScreenshot(args || {});
         return { content: [
-          { type: 'text', text: JSON.stringify(result.info, null, 2) },
+          { type: 'text', text: toolJson(result.info) },
           { type: 'image', data: result.image, mimeType: 'image/png' }
         ] };
       } catch (err) {
@@ -455,7 +456,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_tabs') {
       try {
         const result = await browserTabs(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Tabs Error: ' + err.message }] , isError: true };
       }
@@ -464,7 +465,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_back') {
       try {
         const result = await browserBack(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Back Error: ' + err.message }] , isError: true };
       }
@@ -473,7 +474,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_reload') {
       try {
         const result = await browserReload(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Reload Error: ' + err.message }] , isError: true };
       }
@@ -482,7 +483,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_extract_text') {
       try {
         const result = await browserExtractText(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Extract Text Error: ' + err.message }], isError: true };
       }
@@ -491,7 +492,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_extract_transcript') {
       try {
         const result = await browserExtractTranscript(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Extract Transcript Error: ' + err.message }], isError: true };
       }
@@ -500,7 +501,7 @@ export async function handleBrowserTool(name,args,browserViewLink) {
     if (name === 'browser_execute_js') {
       try {
         const result = await browserExecuteJs(args || {});
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'Browser Execute JS Error: ' + err.message }], isError: true };
       }

@@ -275,11 +275,19 @@ export async function browserSnapshot(args = {}) {
   return data;
 }
 
-function paginateBrowserText(output, args = {}) {
+export const BROWSER_DEFAULT_MAX_CHARS = 30000;
+export const BROWSER_MAX_CHARS_LIMIT = 200000;
+
+export function resolveMaxChars(args = {}) {
+  const requested = Math.floor(Number(args.maxChars || BROWSER_DEFAULT_MAX_CHARS));
+  return Math.min(Math.max(requested, 1000), BROWSER_MAX_CHARS_LIMIT);
+}
+
+export function paginateBrowserText(output, args = {}) {
   const text = String(output ?? '');
   const resultLength = text.length;
   const offset = Math.max(0, Math.floor(Number(args.offset || 0)));
-  const maxChars = Math.min(Math.max(Math.floor(Number(args.maxChars || 200000)), 1000), 200000);
+  const maxChars = resolveMaxChars(args);
   const chunkStart = Math.min(offset, resultLength);
   const chunkEnd = Math.min(chunkStart + maxChars, resultLength);
   const result = text.slice(chunkStart, chunkEnd);
@@ -616,7 +624,7 @@ export async function browserExecuteJs(args = {}) {
 
   const resultLength = output.length;
   const offset = Math.max(0, Math.floor(Number(args.offset || 0)));
-  const maxChars = Math.min(Math.max(Math.floor(Number(args.maxChars || 200000)), 1000), 200000);
+  const maxChars = resolveMaxChars(args);
   const chunkStart = Math.min(offset, resultLength);
   const chunkEnd = Math.min(chunkStart + maxChars, resultLength);
   const chunk = output.slice(chunkStart, chunkEnd);
