@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { Client } from 'ssh2';
 import SftpClient from 'ssh2-sftp-client';
+import { sanitizeOutput, formatExecResult, QUIET_ENV_PREFIX } from './output-sanitizer.js';
 import {
   CHAT_WORKFLOW_INSTRUCTIONS,
   assertAbsolutePath,
@@ -195,7 +196,7 @@ function sshExec(connectionId, command, whitelist, blacklist) {
   return new Promise((resolve, reject) => {
     const conn = sshConnections.get(connectionId);
     if (!conn) return reject(new Error('Koneksi tidak ditemukan: ' + connectionId));
-    conn.exec(command, (err, stream) => {
+    conn.exec(QUIET_ENV_PREFIX + command, (err, stream) => {
       if (err) return reject(err);
       let stdout = '', stderr = '';
       stream.on('data', d => stdout += d);
@@ -272,10 +273,10 @@ function sshExecPersistent(connectionId, command, whitelist, blacklist, timeoutM
       const lines = before.split('\n').filter(l => !l.includes(marker));
       // baris pertama biasanya echo dari command yang diketik
       if (lines.length && lines[0].trim().endsWith(command.trim().split('\n').pop().trim())) lines.shift();
-      const output = lines.join('\n').replace(/\r/g, '').trim();
+      const output = sanitizeOutput(lines.join('\n'));
       resolve({ output, exitCode });
     }, 100);
-    shellState.stream.write(command + '\n');
+    shellState.stream.write(QUIET_ENV_PREFIX + command + '\n');
     shellState.stream.write(`echo "${marker}:$?"\n`);
   }));
 }
@@ -333,7 +334,7 @@ function sshExecBackground(connectionId, command, whitelist, blacklist) {
     const conn = sshConnections.get(connectionId);
     if (!conn) return reject(new Error('Koneksi tidak ditemukan: ' + connectionId));
     const logFile = `/tmp/mcp_bg_${crypto.randomBytes(6).toString('hex')}.log`;
-    const wrapped = `nohup sh -c ${shQuote(command)} > ${logFile} 2>&1 < /dev/null & echo $!`;
+    const wrapped = `nohup sh -c ${shQuote(QUIET_ENV_PREFIX + command)} > ${logFile} 2>&1 < /dev/null & echo $!`;
     conn.exec(wrapped, (err, stream) => {
       if (err) return reject(err);
       let stdout = '', stderr = '';
@@ -2480,7 +2481,7 @@ function createServer(sshDefaultConfig) {
         const whitelist = args.whitelist || config.whitelist || [];
         const blacklist = args.blacklist || config.blacklist || [];
         const result = await sshExec(args.connectionId, args.command, whitelist, blacklist);
-        return { content: [{ type: 'text', text: result.stdout || result.stderr || '(tidak ada output)' }] };
+        return { content: [{ type: 'text', text: formatExecResult(result) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'SSH Exec Error: ' + err.message }] };
       }
@@ -2530,7 +2531,7 @@ function createServer(sshDefaultConfig) {
     if (name === 'ssh_check_background') {
       try {
         const result = await sshCheckBackground(args.connectionId, args.pid, args.logFile, args.lines);
-        return { content: [{ type: 'text', text: result }] };
+        return { content: [{ type: 'text', text: sanitizeOutput(result, { headLines: 3, tailLines: Number.parseInt(args.lines, 10) || 200 }) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: 'SSH Check Background Error: ' + err.message }] };
       }
