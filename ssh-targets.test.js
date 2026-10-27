@@ -22,7 +22,7 @@ test('fingerprint sama dengan format OpenSSH (SHA256 base64 tanpa padding)', () 
 
 test('target valid dinormalisasi dengan default', () => {
   const t = validateTarget({ host: 'vps.example.com', username: 'mcp', hostKeys: [FP] }, 'gudang');
-  assert.deepEqual(t, { name: 'gudang', host: 'vps.example.com', port: 22, username: 'mcp', hostKeys: [FP], keyFile: null, whitelist: [], blacklist: [], description: '' });
+  assert.deepEqual(t, { name: 'gudang', host: 'vps.example.com', port: 22, username: 'mcp', hostKeys: [FP], keyFile: null, whitelist: [], blacklist: [], description: '', uploadRoots: ['/home/mcp', '/tmp'], imageReadRoots: ['/home/mcp', '/tmp'] });
 });
 
 test('nama target harus slug', () => {
@@ -120,4 +120,26 @@ test('describeTargets meringkas target untuk model tanpa membocorkan path key', 
   assert.match(s, /produksi Safara/);
   assert.doesNotMatch(s, /rahasia/);
   assert.equal(describeTargets(new Map()), '(belum ada target terdaftar)');
+});
+
+test('root path default mengikuti home user target (root → /root)', () => {
+  assert.deepEqual(validateTarget({ ...base, username: 'root' }, 'a').uploadRoots, ['/root', '/tmp']);
+});
+
+test('uploadRoots/imageReadRoots bisa diatur dan harus path absolut', () => {
+  const t = validateTarget({ ...base, uploadRoots: ['/srv/app/public'], imageReadRoots: ['/srv/app'] }, 'a');
+  assert.deepEqual(t.uploadRoots, ['/srv/app/public']);
+  assert.deepEqual(t.imageReadRoots, ['/srv/app']);
+  assert.throws(() => validateTarget({ ...base, uploadRoots: ['relatif'] }, 'a'), /uploadRoots/);
+  assert.throws(() => validateTarget({ ...base, imageReadRoots: '/srv' }, 'a'), /imageReadRoots/);
+});
+
+test('buildConnectConfig membawa root path target', () => {
+  const dir = tmp();
+  try {
+    const keyFile = join(dir, 'k'); writeFileSync(keyFile, 'K');
+    const cfg = buildConnectConfig(validateTarget(base, 'attauhid'), { defaultKeyFile: keyFile });
+    assert.deepEqual(cfg.uploadRoots, ['/home/attauhid', '/tmp']);
+    assert.deepEqual(cfg.imageReadRoots, ['/home/attauhid', '/tmp']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

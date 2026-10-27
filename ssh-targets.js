@@ -29,6 +29,16 @@ function regexList(value, field) {
   return [...value];
 }
 
+function pathList(value, field, fallback) {
+  if (value === undefined || value === null) return fallback;
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string' || !isAbsolute(v) || v.includes('\0'))) {
+    throw new Error(`${field} harus array path absolut`);
+  }
+  return [...value];
+}
+
+const homeOf = (username) => (username === 'root' ? '/root' : `/home/${username}`);
+
 export function validateTarget(raw, name) {
   if (!NAME_RE.test(String(name))) throw new Error(`nama target tidak valid: "${name}" (huruf kecil, angka, tanda minus; maks 32)`);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('target harus objek JSON');
@@ -52,7 +62,9 @@ export function validateTarget(raw, name) {
     keyFile: raw.keyFile || null,
     whitelist: regexList(raw.whitelist, 'whitelist'),
     blacklist: regexList(raw.blacklist, 'blacklist'),
-    description: typeof raw.description === 'string' ? raw.description.slice(0, 200) : ''
+    description: typeof raw.description === 'string' ? raw.description.slice(0, 200) : '',
+    uploadRoots: pathList(raw.uploadRoots, 'uploadRoots', [homeOf(raw.username), '/tmp']),
+    imageReadRoots: pathList(raw.imageReadRoots, 'imageReadRoots', [homeOf(raw.username), '/tmp'])
   };
 }
 
@@ -92,7 +104,9 @@ export function buildConnectConfig(target, { defaultKeyFile = DEFAULT_KEY_FILE }
     readyTimeout: 20000,
     hostVerifier: (keyBlob) => pinned.has(fingerprintHostKey(keyBlob)),
     whitelist: target.whitelist,
-    blacklist: target.blacklist
+    blacklist: target.blacklist,
+    uploadRoots: target.uploadRoots,
+    imageReadRoots: target.imageReadRoots
   };
 }
 

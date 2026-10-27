@@ -29,6 +29,10 @@ function serialize(t) {
   if (t.whitelist.length) out.whitelist = t.whitelist;
   if (t.blacklist.length) out.blacklist = t.blacklist;
   if (t.description) out.description = t.description;
+  const home = t.username === 'root' ? '/root' : `/home/${t.username}`;
+  const isDefault = (r) => r.length === 2 && r[0] === home && r[1] === '/tmp';
+  if (!isDefault(t.uploadRoots)) out.uploadRoots = t.uploadRoots;
+  if (!isDefault(t.imageReadRoots)) out.imageReadRoots = t.imageReadRoots;
   return JSON.stringify(out, null, 2) + '\n';
 }
 

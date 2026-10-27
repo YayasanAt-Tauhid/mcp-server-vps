@@ -11,7 +11,7 @@ import { resolve, dirname, extname, normalize, sep } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { Client } from 'ssh2';
-import SftpClient from 'ssh2-sftp-client';
+import { sftpSession } from './sftp-session.js';
 import { sanitizeOutput, formatExecResult, QUIET_ENV_PREFIX } from './output-sanitizer.js';
 import {
   CHAT_WORKFLOW_INSTRUCTIONS,
@@ -164,6 +164,19 @@ function checkAcl(command, whitelist, blacklist) {
     const blocked = blacklist.some(pattern => new RegExp(pattern).test(command));
     if (blocked) throw new Error('Perintah ditolak: ada dalam blacklist');
   }
+}
+
+// Root path: profil proyek > target registry > env global (kompatibilitas).
+function rootsFor(connectionId, kind) {
+  const cfg = sshConfigs.get(connectionId) || {};
+  if (kind === 'upload') return cfg.uploadRoots || UPLOAD_ALLOWED_ROOTS;
+  return cfg.imageReadRoots || IMAGE_READ_ALLOWED_ROOTS;
+}
+
+function requireConnection(connectionId) {
+  const conn = sshConnections.get(connectionId);
+  if (!conn) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
+  return conn;
 }
 
 function sshConnect(connectionId, config) {
@@ -384,9 +397,8 @@ function sshKillBackground(connectionId, pid, signal) {
 async function sshUpload(connectionId, localPath, remotePath) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
-  const sftp = new SftpClient();
+  const sftp = sftpSession(requireConnection(connectionId));
   try {
-    await sftp.connect(config);
     await sftp.put(localPath, remotePath);
     await sftp.end();
     return `File berhasil diupload: ${localPath} → ${remotePath}`;
@@ -396,12 +408,11 @@ async function sshUpload(connectionId, localPath, remotePath) {
   }
 }
 
-async function sshUploadBuffer(connectionId, buffer, remotePath, allowOverwrite = false, allowedRoots = UPLOAD_ALLOWED_ROOTS) {
+async function sshUploadBuffer(connectionId, buffer, remotePath, allowOverwrite = false, allowedRoots = rootsFor(connectionId, 'upload')) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
-  const sftp = new SftpClient();
+  const sftp = sftpSession(requireConnection(connectionId));
   try {
-    await sftp.connect(config);
     const realParent = await sftp.realPath(dirname(remotePath));
     assertAllowedImagePath(realParent, allowedRoots);
     const existingType = await sftp.exists(remotePath);
@@ -419,7 +430,7 @@ async function sshUploadBuffer(connectionId, buffer, remotePath, allowOverwrite 
   }
 }
 
-function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds, kind = 'image', allowOverwrite = false, allowedRoots = UPLOAD_ALLOWED_ROOTS) {
+function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds, kind = 'image', allowOverwrite = false, allowedRoots = rootsFor(connectionId, 'upload')) {
   if (!sshConfigs.has(connectionId)) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
   const safeRemotePath = validateUploadDestination(remotePath, kind, allowedRoots);
   const now = Date.now();
@@ -448,10 +459,9 @@ function createUploadSlot(connectionId, remotePath, maxBytes, expiresInSeconds, 
 async function sshWriteFile(connectionId, remotePath, content, encoding) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
-  const sftp = new SftpClient();
+  const sftp = sftpSession(requireConnection(connectionId));
   try {
     const buf = Buffer.from(content, encoding === 'base64' ? 'base64' : 'utf8');
-    await sftp.connect(config);
     await sftp.put(buf, remotePath);
     await sftp.end();
     return `File berhasil ditulis: ${remotePath} (${buf.length} bytes)`;
@@ -464,9 +474,8 @@ async function sshWriteFile(connectionId, remotePath, content, encoding) {
 async function sshDownload(connectionId, remotePath, localPath) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
-  const sftp = new SftpClient();
+  const sftp = sftpSession(requireConnection(connectionId));
   try {
-    await sftp.connect(config);
     await sftp.get(remotePath, localPath);
     await sftp.end();
     return `File berhasil didownload: ${remotePath} → ${localPath}`;
@@ -476,16 +485,15 @@ async function sshDownload(connectionId, remotePath, localPath) {
   }
 }
 
-async function sshReadImageBuffer(connectionId, remotePath, maxBytes, allowedRoots = IMAGE_READ_ALLOWED_ROOTS) {
+async function sshReadImageBuffer(connectionId, remotePath, maxBytes, allowedRoots = rootsFor(connectionId, 'image')) {
   const config = sshConfigs.get(connectionId);
   if (!config) throw new Error('Koneksi tidak ditemukan: ' + connectionId);
   if (typeof remotePath !== 'string' || !remotePath.startsWith('/') || remotePath.includes('\0')) {
     throw new Error('remotePath harus path absolut yang valid');
   }
   const limit = normalizeImageMaxBytes(maxBytes);
-  const sftp = new SftpClient();
+  const sftp = sftpSession(requireConnection(connectionId));
   try {
-    await sftp.connect(config);
     const realPath = await sftp.realPath(remotePath);
     if (!realPath) throw new Error('path gambar tidak ditemukan');
     assertAllowedImagePath(realPath, allowedRoots);
@@ -2024,7 +2032,7 @@ function createServer() {
 
     if (name === 'ssh_create_upload_slot') {
       try {
-        let allowedRoots = UPLOAD_ALLOWED_ROOTS;
+        let allowedRoots = rootsFor(args.connectionId, 'upload');
         if (args.projectId) {
           const { profile } = await readProjectProfile(args.connectionId, args.projectId);
           if (!profile.uploadRoots.length) throw new Error('project profile belum memiliki uploadRoots');
@@ -2065,7 +2073,7 @@ function createServer() {
 
     if (name === 'ssh_read_image') {
       try {
-        let allowedRoots = IMAGE_READ_ALLOWED_ROOTS;
+        let allowedRoots = rootsFor(args.connectionId, 'image');
         if (args.projectId) {
           const { profile } = await readProjectProfile(args.connectionId, args.projectId);
           if (!profile.imageRoots.length) throw new Error('project profile belum memiliki imageRoots');

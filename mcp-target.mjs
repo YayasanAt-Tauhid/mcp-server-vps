@@ -5,7 +5,7 @@
 //   sudo mcp-target add <nama> --host H [--port 22] --user U [--key /path] [--description "..."] [--yes] [--force]
 //   sudo mcp-target list
 //   sudo mcp-target test <nama>
-//   sudo mcp-target set <nama> [--blacklist REGEX ...] [--whitelist REGEX ...] [--description "..."] [--clear-acl]
+//   sudo mcp-target set <nama> [--blacklist REGEX ...] [--whitelist REGEX ...] [--upload-root PATH ...] [--image-root PATH ...] [--description "..."] [--clear-acl]
 //   sudo mcp-target remove <nama>
 import { execFileSync } from 'node:child_process';
 import { chownSync, existsSync, mkdirSync, readFileSync, chmodSync } from 'node:fs';
@@ -19,7 +19,7 @@ const GROUP = process.env.MCP_GROUP || 'mcpvps';
 
 function parseArgs(argv) {
   const pos = [];
-  const opts = { blacklist: [], whitelist: [] };
+  const opts = { blacklist: [], whitelist: [], 'upload-root': [], 'image-root': [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) { pos.push(a); continue; }
@@ -27,7 +27,7 @@ function parseArgs(argv) {
     if (['yes', 'force', 'clear-acl'].includes(key)) { opts[key] = true; continue; }
     const val = argv[++i];
     if (val === undefined) throw new Error(`--${key} butuh nilai`);
-    if (key === 'blacklist' || key === 'whitelist') opts[key].push(val);
+    if (Array.isArray(opts[key])) opts[key].push(val);
     else opts[key] = val;
   }
   return { pos, opts };
@@ -124,6 +124,8 @@ const commands = {
     if (opts['clear-acl']) { changes.whitelist = []; changes.blacklist = []; }
     if (opts.blacklist.length) changes.blacklist = opts.blacklist;
     if (opts.whitelist.length) changes.whitelist = opts.whitelist;
+    if (opts['upload-root'].length) changes.uploadRoots = opts['upload-root'];
+    if (opts['image-root'].length) changes.imageReadRoots = opts['image-root'];
     updateTarget(TARGETS_DIR, name, changes);
     secure(join(TARGETS_DIR, `${name}.json`), 0o640);
     console.log(`Target "${name}" diperbarui.`);
