@@ -28,7 +28,7 @@ sudo mcp-target add gudang --host 1.2.3.4 --user ubuntu --description "VPS gudan
 sudo mcp-target test gudang
 ```
 
-Di Claude: `ssh_connect({ target: "gudang" })`. Daftar target yang tersedia juga tampil di deskripsi tool `ssh_connect`; target baru terbaca tanpa restart jika registry dimuat ulang, bila tidak muncul restart `mcp-vps2` sekali.
+Di Claude: `ssh_connect({ target: "gudang" })`. Registry dibaca ulang pada setiap `ssh_connect`, jadi target baru langsung bisa dipakai tanpa restart `mcp-vps2`. Daftar target di deskripsi tool baru ikut ter-refresh saat Claude memuat ulang daftar tool (mis. percakapan baru).
 
 ## Perintah lain
 
